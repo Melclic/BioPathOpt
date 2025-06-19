@@ -1,0 +1,26 @@
+name: biopathopt
+channels:
+  - defaults
+  - conda-forge
+  - bioconda
+dependencies:
+  - numpy
+  - pandas
+  - invoke
+  - compress_json
+  - networkx
+  - python-dotenv
+  - tqdm
+  - xmltodict
+  - python-libsbml
+  - bioservices
+  - biopython
+  - ete3
+  - rapidfuzz
+  - pubchempy
+  - pytorch
+  - rdkit
+  - scikit-learn
+  - pip:
+    - cobra
+    - python-libsbml
