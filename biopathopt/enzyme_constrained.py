@@ -69,56 +69,7 @@ class EnzymeConstrainedModel(Data):
         self.mnxr_cofactor_transport = ['MNXR146072', 'MNXR02', 'MNXR99522', 'MNXR101670', 'MNXR96810', 'MNXR99505', 'MNXR100495', 'MNXR105280', 'MNXR101507', 'MNXR96436', 'MNXR104460', 'MNXR101958', 'MNXR191149', 'MNXR96951', 'MNXR100625', 'MNXR96499', 'MNXR98640', 'MNXR98641', 'MNXR101912', 'MNXR101950', 'MNXR104469', 'MNXR100950', 'MNXR101804', 'MNXR102090', 'MNXR191153', 'MNXR142917', 'MNXR96954', 'MNXR104456', 'MNXR96797', 'MNXR145749', 'MNXR155386', 'MNXR96821']
         self.ncbi = None
 
-
-    #def _preprocess_model(self):
-        
-
-    #def (self):
-        """Calculate the 
-        """
-    def _set_kcat(self):
-        #select the kcat and kcat_MW values
-        reac_no_kcat = []
-        for r in self.model.reactions:
-            kcat = r.annotation.get('kcat')
-            if not kcat:
-                for i in ['DBkcat', 'DBsa', 'DLkcat']:
-                    kcat_entry = r.annotation.get(i)
-                    if kcat_entry:
-                        if not kcat:
-                            kcat = kcat_entry.get('kcat')
-                            if kcat:
-                                r.annotation['kcat'] = kcat
-                                break
-            kcat_mw = r.annotation.get('kcat_mw')
-            if not kcat_mw:
-                for i in ['DBkcat', 'DBsa', 'DLkcat']:
-                    kcat_entry = r.annotation.get(i)
-                    if kcat_entry:
-                        if not kcat_mw:
-                            kcat_mw = kcat_entry.get('kcat_mw')
-                            if kcat_mw:
-                                r.annotation['kcat_mw'] = kcat_mw
-                                break
-            if not kcat or not kcat_mw:
-                reac_no_kcat.append(r.id)
-        logging.info(f'There are {len(reac_no_kcat)} reactions with no kcat values')
-
-    
-    def _calc_E(self, input_model=None):
-        if input_model:
-            ec_model = input_model
-        else:
-            ec_model = self.model
-        pfba_sol = pfba(ec_model)
-        #given these constrains run and calculate E
-        for reac_id, flux in pfba_sol.fluxes.items():
-            r = ec_model.reactions.get_by_id(reac_id)
-            try:
-                r.annotation['E'] = float(flux)/float(r.annotation.get('kcat_mw', 0.0))
-            except (ZeroDivisionError, TypeError) as e:
-                pass
-    
+ 
     #### get the ecModel
 
     def get_enzyme_constrain_model(
@@ -299,7 +250,7 @@ class EnzymeConstrainedModel(Data):
             use_progressbar: bool = False):
         # set the subunit and split the model to only forward reactions
         self._get_subunit_data(use_progressbar=use_progressbar)
-        self._get_model_protein_sequence_and_mass(use_progressbar=use_progressbar)
+        self._get_uniprot_aaseq_mw(use_progressbar=use_progressbar)
 
 
     ##### DLKcat ######
@@ -375,7 +326,7 @@ class EnzymeConstrainedModel(Data):
                     raise NameError(f'species_name cannot be found automatically, please define manually')
             else:
                 raise NameError(f'species_name cannot be found automatically, please define manually')
-        self.search_kcat(
+        self._search_kcat(
                 self.species_name,
                 inchikey_levels=inchikey_levels,
                 join_mode=join_mode,
@@ -385,13 +336,150 @@ class EnzymeConstrainedModel(Data):
         self._calculate_mw_kcat()
         self._set_kcat()
 
-    ### other
+
+    def calculate_enzyme_mass_fraction(self, gene_abundance_csv_path, abundance_colname, name_colname, model_gene_name_feature):
+        '''
+        Calculate the enzyme mass fraction (f) based on protein abundance.
+
+        Arguments:
+        * gene_abundance_file: str - File path of the gene abundance data file.
+        * gene_abundance_colname: str - Name of the column in the gene abundance file containing the abundance values.
+        * taxonom_id: str - Taxonomy ID of the organism.
+
+        Returns:
+        * f: float - The enzyme mass fraction.
+
+        '''
+        model_gene_list = [eachg.id for eachg in model.genes]
+        uni_model_gene_list = list(set(model_gene_list))
+
+        gene_abundance_df = pd.read_csv(gene_abundance_csv_path, index_col=None)
+        #gene_names = gene_abundance_df[name_colname].to_list()
+        gene_name_model_id = {}
+        for g_name in gene_abundance_df[name_colname]:
+            for g in self.model.genes:
+                #check if any of the entries have the gene name in the annotation
+                #WARNING does not check if there are multiple hits
+                if annotation_contains_value(g.annotation, g_name):
+                    gene_name_model_id[g_name] = g.id
+        enzy_abundance = 0
+        pro_abundance = 0
+        gene_name_abundance = gene_abundance_df[[name_colname, abundance_colname]].set_index(name_colname).to_dict()[abundance_colname]
+        for g_name in gene_abundance_df[name_colname]:
+            abundance = None
+            try:
+                abundance = gene_name_abundance[g_name] * self.model.genes.get_by_id(gene_name_model_id[g_name]).annotation.get('total_subunits_mw', 0)
+                pro_abundance += abundance
+                enzy_abundance += abundance
+            except KeyError:
+                uniprot_query_url = f"https://rest.uniprot.org/uniprotkb/search?query={g_name}+AND+organism_id:{self.taxonomy_id}&format=tsv&fields=accession,mass"
+                uniprot_mass = requests.get(uniprot_query_url).text.split("\n")[1].split("\t")[1]
+                abundance = gene_name_abundance[g_name] * int(uniprot_mass)
+                pro_abundance += abundance
+        return enzy_abundance / pro_abundance
+
+    #### metabolic engineering strategies
+
+    def run_FSEOF(
+        self,
+        substrate_reaction_id: str,
+        biomass_reaction_id: str,
+        obj_reaction_id: str,
+        substrate_reaction_flux: float = 10.0,
+    ):
+        self.change_carbon_source()
+        ec_model = ecm.get_enzyme_constrain_model(reac.id)
+        ec_model.objective = biomass_id
+        model_pfba_solution = cobra.flux_analysis.pfba(ec_model)
+        wt_sol = model_pfba_solution.fluxes.to_dict()
+        wt_biomass_sol = model_pfba_solution.fluxes[biomass_id]
+
+        exlist = [float(round(i, 3)) for i in np.linspace(0.5 * wt_biomass_sol, wt_biomass_sol * 0.9, 10)]
+
+        all_cond_sol = {}
+        all_fc_sol = {}
+        for cond in exlist:
+            tmp_model = copy.deepcopy(ec_model)
+            self.change_carbon_source()
+            tmp_model.reactions.get_by_id(biomass_reaction_id).bounds = (cond, cond)
+            tmp_model.objective = obj_reaction_id
+            model_pfba_solution = cobra.flux_analysis.pfba(tmp_model)
+            cond_sol = model_pfba_solution.fluxes.to_dict()
+            all_cond_sol[cond] = cond_sol
+            fc_sol = {i: cond_sol[i]/wt_sol[i] for i in cond_sol.keys()}
+            all_fc_sol[cond] = fc_sol
+        fc_mean = {i: [] for i in wt_sol}
+        for i in all_fc_sol:
+            for y in all_fc_sol[i]:
+                if not np.isinf(all_fc_sol[i][y]):
+                    fc_mean[y].append(all_fc_sol[i][y])
+                else:
+                    fc_mean[y].append(1000)
+        fc_mean = {i: np.mean([y for y in fc_mean[i] if y]) for i in fc_mean}
+        fc_status = {}
+        for i in fc_mean:
+            if all(np.array(fc_mean[i])<=1.0) and all(np.array(fc_mean[i])>=0.95):
+                fc_status[i] = 'unchanged'
+            elif all(np.array(fc_mean[i])<0.95):
+                fc_status[i] = 'down'
+            elif all(np.array(fc_mean[i])>1.0):
+                fc_status[i] = 'up'
+        fc_mean = {i: np.mean([y for y in fc_mean[i] if y]) for i in fc_mean}
+        return fc_mean
+
+    ################################
+    ####### Private Functions ######
+    ################################
+
+        
+    def _set_kcat(self):
+        #select the kcat and kcat_MW values
+        reac_no_kcat = []
+        for r in self.model.reactions:
+            kcat = r.annotation.get('kcat')
+            if not kcat:
+                for i in ['DBkcat', 'DBsa', 'DLkcat']:
+                    kcat_entry = r.annotation.get(i)
+                    if kcat_entry:
+                        if not kcat:
+                            kcat = kcat_entry.get('kcat')
+                            if kcat:
+                                r.annotation['kcat'] = kcat
+                                break
+            kcat_mw = r.annotation.get('kcat_mw')
+            if not kcat_mw:
+                for i in ['DBkcat', 'DBsa', 'DLkcat']:
+                    kcat_entry = r.annotation.get(i)
+                    if kcat_entry:
+                        if not kcat_mw:
+                            kcat_mw = kcat_entry.get('kcat_mw')
+                            if kcat_mw:
+                                r.annotation['kcat_mw'] = kcat_mw
+                                break
+            if not kcat or not kcat_mw:
+                reac_no_kcat.append(r.id)
+        logging.info(f'There are {len(reac_no_kcat)} reactions with no kcat values')
+
+    
+    def _calc_E(self, input_model=None):
+        if input_model:
+            ec_model = input_model
+        else:
+            ec_model = self.model
+        pfba_sol = pfba(ec_model)
+        #given these constrains run and calculate E
+        for reac_id, flux in pfba_sol.fluxes.items():
+            r = ec_model.reactions.get_by_id(reac_id)
+            try:
+                r.annotation['E'] = float(flux)/float(r.annotation.get('kcat_mw', 0.0))
+            except (ZeroDivisionError, TypeError) as e:
+                pass
 
     def _calculate_mw_kcat(self):
         for r in self.model.reactions:
             totalmass = 0
             for g in r.genes:
-                totalmass += g.annotation.get('subunitmass', 0)
+                totalmass += g.annotation.get('total_subunits_mw', 0)
             r.annotation['mw'] = totalmass
             try:
                 dlkcat = r.annotation.get('DLkcat').get('kcat')
@@ -569,78 +657,100 @@ class EnzymeConstrainedModel(Data):
         return sub_num
 
 
-    def _get_subunit_data(self, use_progressbar: bool = False) -> None:
+    def _get_subunit_data(self, batch_size: int = 10, use_progressbar = False) -> None:
         """
-        Retrieve UniProt subunit descriptions and infer subunit numbers for genes in a COBRA model.
-        The inferred number is saved in each gene's annotation under the key 'subunitnumber'.
+        Query UniProt for subunit information and annotate genes in the model
+        with the number of subunits based on protein name, gene name, and comment fields.
 
         Args:
-            model (Model): A COBRA model with gene UniProt annotations.
-
+            batch_size (int): Number of UniProt IDs to include in each batch API call.
+            use_progressbar (bool): Show the progressbar (default: False)
+        
         Returns:
             None
         """
-        u = UniProt(verbose=False)
+        if batch_size>500:
+            raise ValueError('The batch_size cannot be larger than 500')
+        uniprot_gene_id = {}
+        uniprot_ids = []
+        for g in self.model.genes:
+            u = g.annotation.get('uniprot', None)
+            if u:
+                if isinstance(u, list):
+                    # WARNING: we deal with multiple possible uniprot entries 
+                    #by selecting the first that works.... not great
+                    for y in u:
+                        uniprot_gene_id[y] = g.id
+                        uniprot_ids.append(y)
+                elif isinstance(u, str):
+                    uniprot_gene_id[u] = g.id
+                    uniprot_ids.append(u)
+                else:
+                    logging.warning(f'Cannot recognise uniprot entry {u}')
+        
+        # Gather the UniProt IDs only
+        logging.debug(f'uniprot_ids: {uniprot_ids}')
 
-        genes_iterator = tqdm(self.model.genes, desc='Fetching subunit information using UniProt') if use_progressbar else self.model.genes
-        for gene in genes_iterator:
-            if 'uniprot' not in gene.annotation:
-                continue
+        # Split into batches
+        batch_iterator = tqdm(range(0, len(uniprot_ids), batch_size), desc='Fetching subunit information using UniProt') if use_progressbar else range(0, len(uniprot_ids), batch_size)
+        for b_it in batch_iterator:
+            batch = uniprot_ids[b_it:b_it + batch_size]
+            logging.debug(f'Processing batch: {batch}')
+            query = " OR ".join([f'accession:{uid}' for uid in batch])
+            logging.debug(f'query: {query}')
+            base_url = "https://rest.uniprot.org/uniprotkb/search"
+            params_reviewed = {
+                "query": query,
+                "format": "json",
+                "fields": "protein_name,gene_names,cc_subunit",
+                "size": batch_size+10,
+            }
 
-            uniprot_id = gene.annotation['uniprot']
-            time.sleep(3.0)
-            response = u.search(uniprot_id, frmt="xml")
+            response = requests.get(base_url, params=params_reviewed)
+            data = response.json()
 
-            protein_names = []
-            gene_names = []
-            subunit_text = ""
+            uniprot_subunit_num = {}
+            for uniprot_entry in data.get('results', []):
+                logging.debug(f'-------------------')
+                protein_names = []
+                prot_desc = uniprot_entry.get('proteinDescription', {})
+                for section in ['recommendedName', 'alternativeNames']:
+                    entries = prot_desc.get(section, [])
+                    entries = [entries] if isinstance(entries, dict) else entries
+                    for entry in entries:
+                        for key in ['fullName', 'shortNames']:
+                            val = entry.get(key)
+                            vals = val if isinstance(val, list) else [val]
+                            for v in vals:
+                                if v and 'value' in v:
+                                    protein_names.append(v['value'])
+                
+                gene_names = [i.get('geneName', {}).get('value') for i in uniprot_entry.get('genes', [])]
 
-            if response:
-                try:
-                    data = xmltodict.parse(response)
-                    entry = data.get("uniprot", {}).get("entry", {})
+                txt_subunit = []
+                for i in uniprot_entry.get('comments', []):
+                    if i.get('commentType', '').lower() == 'subunit':
+                        for y in i.get('texts', []):
+                            txt_subunit.append(y.get('value', ''))
+                txt_subunit = ' '.join(txt_subunit)
 
-                    # Protein names
-                    for section in ["recommendedName", "submittedName"]:
-                        name_data = entry.get("protein", {}).get(section, {})
-                        for k, val in name_data.items():
-                            if k in ["fullName", "shortName"]:
-                                protein_names.append(val if isinstance(val, str) else val.get("#text", ""))
-
-                    alt_names = entry.get("protein", {}).get("alternativeName", [])
-                    if isinstance(alt_names, dict):
-                        alt_names = [alt_names]
-                    for alt in alt_names:
-                        for k, val in alt.items():
-                            if k in ["fullName", "shortName"]:
-                                protein_names.append(val if isinstance(val, str) else val.get("#text", ""))
-
-                    # Gene names
-                    gene_name_data = entry.get("gene", {}).get("name", [])
-                    if isinstance(gene_name_data, dict):
-                        gene_name_data = [gene_name_data]
-                    for g in gene_name_data:
-                        if "#text" in g:
-                            gene_names.append(g["#text"])
-
-                    # Subunit description
-                    comments = entry.get("comment", [])
-                    if isinstance(comments, dict):
-                        comments = [comments]
-                    for c in comments:
-                        if c.get("@type") == "subunit":
-                            txt = c.get("text", {})
-                            subunit_text = txt if isinstance(txt, str) else txt.get("#text", "")
-
-                except Exception:
-                    pass
-
-            sub_num = self._get_subunit_num(
-                protein_names,
-                gene_names,
-                subunit_text
-            )
-            gene.annotation['number_of_subunit'] = sub_num
+                uniprot_id = uniprot_entry.get('primaryAccession')
+                logging.debug(f'uniprot_id: {uniprot_id}')
+                if uniprot_id:
+                    logging.debug(f'protein_names: {protein_names}')
+                    logging.debug(f'gene_names: {gene_names}')
+                    logging.debug(f'txt_subunit: {txt_subunit}')
+                    # Get the gene and add the annotation
+                    try:
+                        gene = self.model.genes.get_by_id(uniprot_gene_id[uniprot_id])
+                        logging.debug(f'Found gene {gene.id}')
+                        if ('number_of_subunits' in gene.annotation and gene.annotation.get('number_of_subunits')) or not 'number_of_subunits' in gene.annotation:
+                            logging.debug(f'-> Adding subunit number')
+                            gene.annotation['number_of_subunits'] = self._get_subunit_num(
+                                protein_names, gene_names, txt_subunit
+                            )
+                    except KeyError:
+                        logging.warning(f'Cannot find the gene for the following uniprot: {uniprot}')
 
 
     def _fetch_protein_sequence(self, uniprot_id: str) -> Optional[str]:
@@ -682,85 +792,88 @@ class EnzymeConstrainedModel(Data):
         return ProteinAnalysis(cleaned_seq).molecular_weight()
 
 
-    def _get_model_protein_sequence_and_mass(self, use_progressbar: bool = False) -> None:
+    def _get_uniprot_aaseq_mw(self, batch_size: int = 10, use_progressbar: bool = False) -> None:
         """
-        Updates the gene annotations in the model with UniProt-based protein sequence, mass,
-        and subunit mass (based on the 'number_of_subunit' field in each gene's annotation).
+        Fetch amino acid sequences and molecular weights from UniProt and annotate COBRA model genes.
 
         Args:
-            model (Model): A COBRA model with genes annotated with UniProt IDs and subunit numbers.
+            model (Any): COBRA model containing genes with UniProt annotations.
+            batch_size (int): Number of UniProt entries per API batch request.
+            use_progressbar (bool): Whether to display a tqdm progress bar during execution.
 
         Returns:
             None
         """
-        #seen_uniprots = set()
+        if batch_size>500:
+            raise ValueError('The batch_size cannot be larger than 500')
+        uniprot_gene_id = {}
+        uniprot_ids = []
+        for g in self.model.genes:
+            u = g.annotation.get('uniprot', None)
+            if u:
+                if isinstance(u, list):
+                    # WARNING: we deal with multiple possible uniprot entries 
+                    #by selecting the first that works.... not great
+                    for y in u:
+                        uniprot_gene_id[y] = g.id
+                        uniprot_ids.append(y)
+                elif isinstance(u, str):
+                    uniprot_gene_id[u] = g.id
+                    uniprot_ids.append(u)
+                else:
+                    logging.warning(f'Cannot recognise uniprot entry {u}')
+        
+        # Gather the UniProt IDs only
+        logging.debug(f'uniprot_ids: {uniprot_ids}')
 
-        genes_iterator = tqdm(self.model.genes, desc='Fetching molecular weights using UniProt') if use_progressbar else self.model.genes
-        for gene in genes_iterator:
-            if "uniprot" in gene.annotation:
-                uniprot_id = gene.annotation.get("uniprot")
-        
-                aaseq = self._fetch_protein_sequence(uniprot_id)
-                if not aaseq:
-                    continue
-        
-                mass = self._compute_mass(aaseq)
-                subunit_number = gene.annotation.get("number_of_subunit", 1)
-        
-                try:
-                    subunit_number = int(subunit_number)
-                except (ValueError, TypeError):
-                    subunit_number = 1
-        
-                subunitmass = mass * subunit_number
-        
-                gene.annotation["aaseq"] = aaseq
-                gene.annotation["mass"] = mass
-                gene.annotation["subunitmass"] = subunitmass
-        
-                #seen_uniprots.add(uniprot_id)
-
-
-    '''TODO: rewrite above with the following batch style request:
-    def get_uniprot_aaseq_mw(uniprot_ids: List[str], batch_size=50):
-        """
-        Retrieve a UniProt ID for a gene given a taxonomy ID using the UniProt REST API.
-        Prioritizes reviewed (Swiss-Prot) entries and falls back to unreviewed if needed.
-
-        Args:
-            gene_name (str): The gene name to search for.
-            taxonomy_id (int): The NCBI taxonomy ID of the organism.
-
-        Returns:
-            Optional[str]: The UniProt accession ID if found, else None.
-        """
         base_url = "https://rest.uniprot.org/uniprotkb/search"
-        results = {}
-        
-        for i in range(0, len(uniprot_ids), batch_size):
-            batch = uniprot_ids[i:i + batch_size]
-            query = " OR ".join([f'accession:{uid}' for uid in batch])
-            # Try reviewed (Swiss-Prot) first
+        batch_iterator = tqdm(
+            range(0, len(uniprot_ids), batch_size),
+            desc='Fetching protein information using UniProt'
+        ) if use_progressbar else range(0, len(uniprot_ids), batch_size)
+
+        # Split into batches
+        for b_it in batch_iterator:
+            batch = uniprot_ids[b_it:b_it + batch_size]
+            query = " OR ".join([f'accession:{uid}' for uid in batch]) 
+            # Send UniProt API request for sequence and molecular weight
             params_reviewed = {
                 "query": query,
                 "format": "json",
                 "fields": "accession,sequence,mass",
-                "size": 100 #only return one
+                "size": batch_size + 10
             }
-        
+
             response = requests.get(base_url, params=params_reviewed)
-            if response.status_code == 200:
-                data = response.json()
-                response_res = data.get("results", [])
-                if response_res:
-                    for y in response_res:
-                        uniprot_id = y.get('primaryAccession')
-                        sequence = y.get('sequence').get('value')
-                        mw = y.get('sequence').get('molWeight')
-                        if uniprot_id:
-                            results[uniprot_id] = {'aaseq': sequence, 'mw': mw}
-        return results
-    '''
+            data = response.json()
+
+            for res_entry in data.get("results", []):
+                uniprot_id = res_entry.get('primaryAccession')
+                sequence = res_entry.get('sequence', {}).get('value')
+                mw = res_entry.get('sequence', {}).get('molWeight')
+
+                # If molWeight is not given, compute it
+                if not mw and sequence:
+                    mw = self._compute_mass(sequence)
+
+                if uniprot_id:
+                    try:
+                        gene = self.model.genes.get_by_id(uniprot_gene_id[uniprot_id])
+                        if ('aaseq' in gene.annotation and gene.annotation.get('number_of_subunits')) or not 'aaseq' in gene.annotation:
+                            gene.annotation['aaseq'] = sequence
+                        if ('mw' in gene.annotation and gene.annotation.get('mw')) or not 'mw' in gene.annotation:
+                            gene.annotation['mw'] = mw
+                        # Optionally compute total molecular weight based on subunit number
+                        subunit_number = gene.annotation.get('number_of_subunits')
+                        if subunit_number:
+                            if ('total_subunits_mw' in gene.annotation and gene.annotation.get('total_subunits_mw')) or not 'total_subunits_mw' in gene.annotation:
+                                try:
+                                    gene.annotation["total_subunits_mw"] = float(mw) * float(subunit_number)
+                                except ValueError:
+                                    logging.warning(f'Could not convert {mw} or {subunit_number}')
+                    except KeyError:
+                        logging.warning(f'UniProt ID {uniprot_id} not found in gene map')
+
 
     def _convert_to_irreversible(
             self, 
@@ -868,7 +981,7 @@ class EnzymeConstrainedModel(Data):
 
     ####### Database kcat search ####o
 
-    def search_kcat(
+    def _search_kcat(
         self,
         species_name: str, 
         inchikey_levels: int = 2,
@@ -999,7 +1112,7 @@ class EnzymeConstrainedModel(Data):
                     if not kcat_res:
                         #WARNING: only returning one 
                         #TODO: find the best EC number based on the list
-                        sabiork_entry = self.search_kcat_sabiork(ec_number=brenda_ec_code)
+                        sabiork_entry = self._search_kcat_sabiork(ec_number=brenda_ec_code)
                         if sabiork_entry:
                             for params in param_combinations:
                                 try:
@@ -1358,7 +1471,7 @@ class EnzymeConstrainedModel(Data):
         return res
 
 
-    def search_kcat_sabiork(
+    def _search_kcat_sabiork(
         self,
         ec_number,
         kegg_id=None
@@ -1533,92 +1646,3 @@ class EnzymeConstrainedModel(Data):
         return float(value), float(np.std(all_values_array))
 
 
-    def calculate_enzyme_mass_fraction(self, gene_abundance_csv_path, abundance_colname, name_colname, model_gene_name_feature):
-        '''
-        Calculate the enzyme mass fraction (f) based on protein abundance.
-
-        Arguments:
-        * gene_abundance_file: str - File path of the gene abundance data file.
-        * gene_abundance_colname: str - Name of the column in the gene abundance file containing the abundance values.
-        * taxonom_id: str - Taxonomy ID of the organism.
-
-        Returns:
-        * f: float - The enzyme mass fraction.
-
-        '''
-        model_gene_list = [eachg.id for eachg in model.genes]
-        uni_model_gene_list = list(set(model_gene_list))
-
-        gene_abundance_df = pd.read_csv(gene_abundance_csv_path, index_col=None)
-        #gene_names = gene_abundance_df[name_colname].to_list()
-        gene_name_model_id = {}
-        for g_name in gene_abundance_df[name_colname]:
-            for g in self.model.genes:
-                #check if any of the entries have the gene name in the annotation
-                #WARNING does not check if there are multiple hits
-                if annotation_contains_value(g.annotation, g_name):
-                    gene_name_model_id[g_name] = g.id
-        enzy_abundance = 0
-        pro_abundance = 0
-        gene_name_abundance = gene_abundance_df[[name_colname, abundance_colname]].set_index(name_colname).to_dict()[abundance_colname]
-        for g_name in gene_abundance_df[name_colname]:
-            abundance = None
-            try:
-                abundance = gene_name_abundance[g_name] * self.model.genes.get_by_id(gene_name_model_id[g_name]).annotation.get('subunitmass', 0)
-                pro_abundance += abundance
-                enzy_abundance += abundance
-            except KeyError:
-                uniprot_query_url = f"https://rest.uniprot.org/uniprotkb/search?query={g_name}+AND+organism_id:{self.taxonomy_id}&format=tsv&fields=accession,mass"
-                uniprot_mass = requests.get(uniprot_query_url).text.split("\n")[1].split("\t")[1]
-                abundance = gene_name_abundance[g_name] * int(uniprot_mass)
-                pro_abundance += abundance
-        return enzy_abundance / pro_abundance
-
-    #### metabolic engineering strategies
-
-    def run_FSEOF(
-        self,
-        substrate_reaction_id: str,
-        biomass_reaction_id: str,
-        obj_reaction_id: str,
-        substrate_reaction_flux: float = 10.0,
-    ):
-        self.change_carbon_source()
-        ec_model = ecm.get_enzyme_constrain_model(reac.id)
-        ec_model.objective = biomass_id
-        model_pfba_solution = cobra.flux_analysis.pfba(ec_model)
-        wt_sol = model_pfba_solution.fluxes.to_dict()
-        wt_biomass_sol = model_pfba_solution.fluxes[biomass_id]
-
-        exlist = [float(round(i, 3)) for i in np.linspace(0.5 * wt_biomass_sol, wt_biomass_sol * 0.9, 10)]
-
-        all_cond_sol = {}
-        all_fc_sol = {}
-        for cond in exlist:
-            tmp_model = copy.deepcopy(ec_model)
-            self.change_carbon_source()
-            tmp_model.reactions.get_by_id(biomass_reaction_id).bounds = (cond, cond)
-            tmp_model.objective = obj_reaction_id
-            model_pfba_solution = cobra.flux_analysis.pfba(tmp_model)
-            cond_sol = model_pfba_solution.fluxes.to_dict()
-            all_cond_sol[cond] = cond_sol
-            fc_sol = {i: cond_sol[i]/wt_sol[i] for i in cond_sol.keys()}
-            all_fc_sol[cond] = fc_sol
-        fc_mean = {i: [] for i in wt_sol}
-        for i in all_fc_sol:
-            for y in all_fc_sol[i]:
-                if not np.isinf(all_fc_sol[i][y]):
-                    fc_mean[y].append(all_fc_sol[i][y])
-                else:
-                    fc_mean[y].append(1000)
-        fc_mean = {i: np.mean([y for y in fc_mean[i] if y]) for i in fc_mean}
-        fc_status = {}
-        for i in fc_mean:
-            if all(np.array(fc_mean[i])<=1.0) and all(np.array(fc_mean[i])>=0.95):
-                fc_status[i] = 'unchanged'
-            elif all(np.array(fc_mean[i])<0.95):
-                fc_status[i] = 'down'
-            elif all(np.array(fc_mean[i])>1.0):
-                fc_status[i] = 'up'
-        fc_mean = {i: np.mean([y for y in fc_mean[i] if y]) for i in fc_mean}
-        return fc_mean
