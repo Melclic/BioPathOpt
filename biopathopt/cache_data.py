@@ -23,7 +23,7 @@ import pubchempy as pcp
 
 from typing import Tuple, Dict, List, Union, Optional, Any
 
-from biopathopt.utils import fuzzy_dict_lookup
+from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract
 
 """Collection of functions that fetch data from MetaNetX
 
@@ -302,16 +302,22 @@ class Data:
             try:
                 return self.chem_prop[self.single_depr_mnxm(mnxm)]
             except KeyError:
+                try:
+                    search_mnxm = self.single_depr_mnxm(mnxm)
+                except KeyError:
+                    search_mnxm = mnxm
                 #  if all else fails, find the closest member of the deprecated map
-                for i in list(
-                    nx.bfs_tree(
-                        self.g_depr_mnxm, self.single_depr_mnxm(mnxm), reverse=True
-                    )
-                ):
-                    try:
-                        return self.chem_prop[i]
-                    except KeyError:
-                        pass
+                try:
+                    depr_lst = list(nx.bfs_tree(
+                            self.g_depr_mnxm, search_mnxm, reverse=True
+                        ))
+                    for i in depr_lst:
+                        try:
+                            return self.chem_prop[i]
+                        except KeyError:
+                            pass
+                except nx.exception.NetworkXError as e:
+                    pass
         logging.warning("Cannot find chem properties for: " + str(mnxm))
         return {}
 
@@ -1034,9 +1040,9 @@ class Data:
                 try:
                     if not pd.isna(self.chem_prop[i]["InChIKey"]) or not self.chem_prop[i]["InChIKey"]=='nan':
                         self._inchikey2_mnxm[
-                            '-'.join(str( self.chem_prop[i]['InChIKey'] ).split('-')[:2])
+                            inchikey_layer_extract(self.chem_prop[i]['InChIKey'], 2)
                         ] = self.single_depr_mnxm(i)
-                except KeyError:
+                except (KeyError, AttributeError) as e:
                     pass
         return self._inchikey2_mnxm
 
@@ -1370,26 +1376,18 @@ class Data:
             return self.mnxm_xref(mnxm)
         except KeyError:
             if ignore_stereo:
-                tmp = [
-                    i
-                    for i in self.inchikey_mnxm
-                    if "-".join(inchikey.split("-")[:2]) in i
-                ]
-                if len(tmp) == 1:
-                    mnxm = self.inchikey_mnxm[tmp[0]]
+                try:
+                    mnxm = self.inchikey2_mnxm[inchikey_layer_extract(inchikey, 2)]
                     return self.mnxm_xref(mnxm)
-                else:
-                    logging.debug(
-                        "Cannot find the unique inchi when ignoring the stereo: "
-                        + str(tmp)
-                    )
+                except KeyError:
                     pass
-        logging.warning("Cannot find the follwing inchikey: " + str(inchikey))
+        logging.debug("Cannot find the follwing inchikey: " + str(inchikey))
         return {}, None
 
     def mnxm_xref(self, mnxm):
         """Return the cross reference for a MetaNetX molecule ID
 
+        TODO: change this to mnxm_description that includes the xref
         Args:
             mnxm (str): MetaNetX species id
         Returns:

@@ -22,7 +22,7 @@ from rapidfuzz.distance import Levenshtein
 
 from typing import List, Union, Dict, Optional, Tuple, Any
 
-from biopathopt import Data
+from biopathopt import ModelBuilder
 from biopathopt import dlkcat
 from biopathopt.utils import inchikey_layer_extract, annotation_contains_value
 
@@ -41,17 +41,25 @@ warnings.filterwarnings(
     message=".*Malformed gene_reaction_rule.*"
 )
 
-class EnzymeConstrainedModel(Data):
+class EnzymeConstrainedModel(ModelBuilder):
     
-    def __init__(self, model: Model, species_name=None, taxonomy_id=None):
-        super().__init__()
-        self.model = model.copy()
+    def __init__(self, path_to_model: str, species_name=None, taxonomy_id=None, use_progressbar: bool = False):
+        super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar)
+        #TODO: print the stats of uniprot, structure, etc... so that we can
+        # give a warning if the coverage is too low
         self.taxonomy_id = None
+        self.ec_model = None
         self.species_name = species_name
         if species_name and not taxonomy_id:
             self.taxonomy = self._get_taxid_from_species(species_name)
         if taxonomy_id and not species_name:
-            self.species_name = self._get_species_name(taxonomy)
+            self.species_name = self._get_species_name(taxonomy_id)
+        if not self.species_name and not self.taxonomy_id:
+            taxid = self.model.annotation.get('taxonomy', None)
+            if taxid:
+                self.taxonomy_id = taxid
+                self.species_name = self._get_species_name(taxid)
+        #TODO: Add the taxonomy id and species name in the model annotation
         self.brenda_ec_G = self._json_brenda_to_G()
         self.cofactors_inchikey_layers3 = []
         self.cofactors_inchikey_layers2 = []
@@ -67,12 +75,11 @@ class EnzymeConstrainedModel(Data):
             except KeyError:
                 pass
         self.mnxr_cofactor_transport = ['MNXR146072', 'MNXR02', 'MNXR99522', 'MNXR101670', 'MNXR96810', 'MNXR99505', 'MNXR100495', 'MNXR105280', 'MNXR101507', 'MNXR96436', 'MNXR104460', 'MNXR101958', 'MNXR191149', 'MNXR96951', 'MNXR100625', 'MNXR96499', 'MNXR98640', 'MNXR98641', 'MNXR101912', 'MNXR101950', 'MNXR104469', 'MNXR100950', 'MNXR101804', 'MNXR102090', 'MNXR191153', 'MNXR142917', 'MNXR96954', 'MNXR104456', 'MNXR96797', 'MNXR145749', 'MNXR155386', 'MNXR96821']
-        self.ncbi = None
 
  
     #### get the ecModel
 
-    def get_enzyme_constrain_model(
+    def return_ec_model(
             self,
             substrate_exchange_reaction_id: str,
             substrate_concentration: float = 10.0,
@@ -80,7 +87,8 @@ class EnzymeConstrainedModel(Data):
             protein_fraction: float = 0.56, 
             enzyme_saturation: float = 1.0,
             lowerbound: int = None,
-            upperbound: int = None):
+            upperbound: int = None,
+            overwrite_kcat: dict  = {}):
         ec_model = copy.deepcopy(self.model)
         try:
             substrate_exchange_reaction = ec_model.reactions.get_by_id(substrate_exchange_reaction_id)
@@ -105,6 +113,10 @@ class EnzymeConstrainedModel(Data):
         coefficients = {}
         for r in ec_model.reactions:
             try:
+                if r.id in overwrite_kcat:
+                    logging.debug(f'Setting reaction {r.id} kcat from {r.annotation["kcat"]} to {overwrite_kcat[r.id]}')
+                    r.annotation['kcat'] = overwrite_kcat[r.id]
+                    r.annotation['kcat_mw'] = overwrite_kcat[r.id] * 3600*1000/r.annotation.get('mw', 0.0)
                 coefficients[r.forward_variable] = 1.0 / float(r.annotation.get('kcat_mw', 0.0))
                 #logging.debug(f'Updated the coefficient for {r.id} - {r.forward_variable}: {coefficients[r.forward_variable]}')
             except (ZeroDivisionError, TypeError) as e:
@@ -120,12 +132,17 @@ class EnzymeConstrainedModel(Data):
     def optimize_ec_model(
         self,
         target_growth_rate_h: float,
-        model_objective: str,
-        substrate_id: str,
-        extracellular_compartment: str,
+        #substrate_id: str,
+        carbon_exchange_reaction: str,
+        model_objective: str = None,
         substrate_concentration: float = 10.0,
-        rtol=1e-3, 
-        atol=0.0,
+        enzyme_mass_fraction: float = 0.405, 
+        protein_fraction: float = 0.56, 
+        enzyme_saturation: float = 1.0,
+        lowerbound: int = None,
+        upperbound: int = None,
+        maximum_optimization_rounds: int = 50,
+        use_progressbar: bool = False,
     ):
         """Optimize EC model to get to a realistic growth value. This method 
         compensates for the shortcomings of this method that may restrict the 
@@ -133,40 +150,62 @@ class EnzymeConstrainedModel(Data):
         Here, we replace those reactions that have the highest enzyme ratio
         with their corresponding EC number highest recorded kcat.
         """
+        """
         carbon_reac = self.change_carbon_source(
-            substrate_id=substrate_id,
-            extracellular_compartment=extracellular_compartment,
+            metabolite_id=substrate_id,
+            extracellular_compartment_id=extracellular_compartment_id,
             substrate_concentration=substrate_concentration,)
-        ec_model = self.get_enzyme_constrain_model(carbon_reac.id)
-        ec_model.obj = model_objective
+        """
+        #logging.info(f'The carbon reaction is: {carbon_reac.id}')
+        if carbon_exchange_reaction not in self.model.reactions:
+            raise KeyError(f'The reaction {carbon_exchange_reaction} does not exist in the model')
+        ec_model = self.return_ec_model(
+                substrate_exchange_reaction_id=carbon_exchange_reaction,
+                substrate_concentration=substrate_concentration,
+                enzyme_mass_fraction=enzyme_mass_fraction, 
+                protein_fraction=protein_fraction, 
+                enzyme_saturation=enzyme_saturation,
+                lowerbound=lowerbound,
+                upperbound=upperbound,
+            )
+        if model_objective:
+            if model_objective not in ec_model.reactions:
+                raise KeyError(f'The objective {model_objective} does not exist')
+            ec_model.obj = model_objective
 
-        updated_reacs = []
-        self.model.obj = model_objective
-        self._calc_E()
-        all_E = []
-        for r in self.model.reactions:
-            e = r.annotation.get('E')
-            if e:
-                all_E.append(e)
-        sum_E = sum(all_E)
-        enz_ratio = {}
-        for r in self.model.reactions:
-            e = r.annotation.get('E')
-            if e:
-                enz_ratio[r.id] = e/sum_E
+        pfba_sol = pfba(ec_model)
+        reaction_E = {}
+        #given these constrains run and calculate E
+        for reac_id, flux in pfba_sol.fluxes.items():
+            r = ec_model.reactions.get_by_id(reac_id)
+            try:
+                reaction_E[r.id] = float(flux)/float(r.annotation.get('kcat_mw', 0.0))
+            except (ZeroDivisionError, TypeError) as e:
+                pass
+        sum_E = sum([reaction_E[i] for i in reaction_E])
+        logging.debug(f'sum_E: {sum_E}')
+        enz_ratio = {i: reaction_E[i]/sum_E for i in reaction_E}
         sorted_enz_ratio = sorted(enz_ratio.items(), key=lambda item: item[1], reverse=True)
-
+        logging.debug('sorted_enz_ratio: {sorted_enz_ratio}')
         model_gr = ec_model.slim_optimize()
         logging.debug(f'-------------- {model_gr} ---------------')
         updated_reacs = []
         #while not np.isclose(model_gr, target_growth_rate_h, rtol=rtol, atol=atol):
-        while model_gr<target_growth_rate_h:
+        if use_progressbar:
+            progress = tqdm(total=maximum_optimization_rounds, desc=f'Growth rate is {model_gr}')
+        num_round = 0
+        new_kcat = {}
+        while (model_gr<target_growth_rate_h and num_round<maximum_optimization_rounds):
             #select the next reaction
-            for select_reaction, e_ratio in sorted_enz_ratio:
-                if select_reaction not in updated_reacs:
+            select_reaction = None
+            for s_r, e_ratio in sorted_enz_ratio:
+                if s_r not in updated_reacs:
+                    select_reaction = s_r
                     break
+            logging.debug(f'select_reaction: {select_reaction}')
             # update the kcat to max
-            reac = self.model.reactions.get_by_id(select_reaction)
+            update_reac_kcat_mw = {}
+            reac = ec_model.reactions.get_by_id(select_reaction)
             if "ec-code" in reac.annotation.keys():
                 ec_number = reac.annotation["ec-code"]
                 kcat_max_list = []
@@ -190,67 +229,44 @@ class EnzymeConstrainedModel(Data):
                     reac.annotation['kcat'] = reaction_kcat_max #h_1
                     logging.debug(f'new kcat: {reaction_kcat_max}')
                     try:
-                        reac.annotation['kcat_mw'] = reaction_kcat_max * 3600*1000/reac.annotation.get('mw', 0.0)
-                        logging.debug(f"new kcat_mw: {reaction_kcat_max * 3600*1000/reac.annotation.get('mw', 0.0)}")
+                        #TODO: change to just multiply the kcat instead of finding the highest recorded kcat
+                        # this is erronous since these include genetically engineered enzymes
+                        new_kcat[reac.id] = reaction_kcat_max
                     except ZeroDivisionError:
                         pass
+            #### update the coefficients
+            ec_model = self.return_ec_model(
+                    substrate_exchange_reaction_id=carbon_exchange_reaction,
+                    substrate_concentration=substrate_concentration,
+                    enzyme_mass_fraction=enzyme_mass_fraction, 
+                    protein_fraction=protein_fraction, 
+                    enzyme_saturation=enzyme_saturation,
+                    lowerbound=lowerbound,
+                    upperbound=upperbound,
+                    overwrite_kcat=new_kcat,
+                )
+            ### update the results
             updated_reacs.append(select_reaction)
-            ec_model = self.get_enzyme_constrain_model(carbon_reac.id)
-            ec_model.obj = model_objective
             model_gr = ec_model.slim_optimize()
+            num_round += 1
+            if use_progressbar:
+                progress.set_description(f"Growth Rate is {model_gr}")
+                progress.update(1)
             logging.debug(f'-------------- {model_gr} ---------------')
-        model_gr = ec_model.slim_optimize()
+        return updated_reacs
 
 
-    def change_carbon_source(
-            self,
-            metabolite_id, 
-            extracellular_compartment_id, 
-            substrate_concentration=10,
-            input_model=None,
-            ):
-        #find all the exchange reactions that are substrates and is they have a 
-        #carbon then reset. This is to ensure that the carbon source we are 
-        #inputting is the only one
-        for r in self.model.exchanges:
-            if r.lower_bound < 0:
-                if any([annotation_contains_value(r.annotation, i) for i in self.mnxr_cofactor_transport]):
-                    continue
-                for m in r.metabolites.keys():
-                    if 'C' in m.formula:
-                        if m.formula=='CO2':
-                            continue
-                        r.bounds = (0, 0)
-        ### set new carbon
-        #first find it
-        met = None
-        for m in self.model.metabolites:
-            if m.compartment==extracellular_compartment_id:
-                if annotation_contains_value(m.annotation, metabolite_id):
-                    met = m
-                    break
-        if not met:
-            raise TypeError(f'Could not find the metabolite {metabolite_id} in compartment {extracellular_compartment_id}')
-        logging.debug(f'The identified substrate metabolite is {met.id}')
-        reac = None
-        for r in self.model.exchanges:
-            if met in r.metabolites:
-                reac = r
-                break
-        if not reac:
-            #TODO: add the exchange reaction if it does not exist
-            raise TypeError(f'Could not find the exchange reaction that carries the substrate {metabolite_id}')
-        logging.debug(f'The identified carbon reaction is {reac.id}')
-        if reac:
-            reac.bounds = (-substrate_concentration, 0)
-        return reac
-
-    def get_protein_information(
+    def enzyme_enrich_model(
             self, 
+            species_name = None,
+            taxonomy_id = None,
             use_progressbar: bool = False):
         # set the subunit and split the model to only forward reactions
         self._get_subunit_data(use_progressbar=use_progressbar)
         self._get_uniprot_aaseq_mw(use_progressbar=use_progressbar)
+        self.calculate_dlkcat(use_progressbar=use_progressbar)
+        self.database_kcat(species_name=species_name, taxonomy_id=taxonomy_id, use_progressbar=use_progressbar)
+
 
 
     ##### DLKcat ######
@@ -385,10 +401,11 @@ class EnzymeConstrainedModel(Data):
         substrate_reaction_id: str,
         biomass_reaction_id: str,
         obj_reaction_id: str,
+        carbon_exchange_reaction: str,
         substrate_reaction_flux: float = 10.0,
     ):
-        self.change_carbon_source()
-        ec_model = ecm.get_enzyme_constrain_model(reac.id)
+        #self.change_carbon_source()
+        ec_model = ecm.gen_ec_model(carbon_exchange_reaction)
         ec_model.objective = biomass_id
         model_pfba_solution = cobra.flux_analysis.pfba(ec_model)
         wt_sol = model_pfba_solution.fluxes.to_dict()
@@ -460,21 +477,6 @@ class EnzymeConstrainedModel(Data):
                 reac_no_kcat.append(r.id)
         logging.info(f'There are {len(reac_no_kcat)} reactions with no kcat values')
 
-    
-    def _calc_E(self, input_model=None):
-        if input_model:
-            ec_model = input_model
-        else:
-            ec_model = self.model
-        pfba_sol = pfba(ec_model)
-        #given these constrains run and calculate E
-        for reac_id, flux in pfba_sol.fluxes.items():
-            r = ec_model.reactions.get_by_id(reac_id)
-            try:
-                r.annotation['E'] = float(flux)/float(r.annotation.get('kcat_mw', 0.0))
-            except (ZeroDivisionError, TypeError) as e:
-                pass
-
     def _calculate_mw_kcat(self):
         for r in self.model.reactions:
             totalmass = 0
@@ -526,6 +528,7 @@ class EnzymeConstrainedModel(Data):
         """
         lPossibleSubunitsFromName = []
         lAllNames = protein_names + gene_names
+        lAllNames = [i for i in lAllNames if not pd.isna(i)]
         lnameEnzyme = []
         possibleWords = ['subunit', 'subunits', 'component', 'alpha chain', 'beta chain', 'gamma chain',
                          '30S ribosomal protein', '50S ribosomal protein', 'binding protein', 'large chain',
@@ -535,7 +538,10 @@ class EnzymeConstrainedModel(Data):
         namesWithSubunitsIndication = []
         
         for p in possibleWords:
-            namesWithSubunitsIndication = [el for el in lAllNames if p in el]
+            if not lAllNames or all(x is None or pd.isna(x) for x in lAllNames):
+                namesWithSubunitsIndication = []
+            else:
+                namesWithSubunitsIndication = [el for el in lAllNames if p in el]
             
             if re.search('RNA-binding protein|methyltransferase|Nucleotide-binding protein|Phosphotransferase|\
                           Transport|AMP-forming|Two-component|SsrA|Ribonuclease', str(namesWithSubunitsIndication)):
@@ -853,8 +859,12 @@ class EnzymeConstrainedModel(Data):
                 mw = res_entry.get('sequence', {}).get('molWeight')
 
                 # If molWeight is not given, compute it
-                if not mw and sequence:
+                if not isinstance(mw, (int, float)) and sequence:
                     mw = self._compute_mass(sequence)
+
+                if not isinstance(mw, (int, float)):
+                    logging.warning(f'The unitprot {uniprot_id} does not have valid mw {mw}')
+                    continue
 
                 if uniprot_id:
                     try:
@@ -940,7 +950,7 @@ class EnzymeConstrainedModel(Data):
 
         input_model.add_reactions(reactions_to_add)
         #QUESTION: why set the objective to add the coefficients?
-        logging.debug(coefficients)
+        #logging.debug(coefficients)
         set_objective(input_model, coefficients, additive=True)
 
 
@@ -1004,13 +1014,19 @@ class EnzymeConstrainedModel(Data):
         Returns:
             Dict[str, Any]: Mapping of reaction IDs to matched kcat values and metadata.
         """
-        reac_iterator = tqdm(self.model.reactions, desc='Kcat search') if use_progressbar else self.model.reactions
+        reac_iterator = tqdm(self.model.reactions, desc='Database lookup of reaction kcat') if use_progressbar else self.model.reactions
         for r in reac_iterator:
             logging.debug(f'------ {r.id} ------')
             ### Gather the information
             uniprot = []
             for g in r.genes:
-                uniprot.append(g.annotation.get('uniprot'))
+                u = g.annotation.get('uniprot', [])
+                if isinstance(u, list):
+                    uniprot += u
+                elif isinstance(u, str):
+                    uniprot.append(u)
+                else:
+                    logging.warning(f'Cannot find out the type of {u}')
             uniprot = [x for x in uniprot if x is not pd.isna(x)]
             uniprot = list(set(uniprot))
             brenda_ec_code = None
@@ -1046,7 +1062,10 @@ class EnzymeConstrainedModel(Data):
                             except KeyError:
                                 inchikey = None
                     elif isinstance(mnxm, str): 
-                        inchikey = self.mnxm_inchikey[mnxm]
+                        try:
+                            inchikey = self.mnxm_inchikey[mnxm]
+                        except KeyError:
+                            inchikey = None
                 if inchikey:
                     if not self._is_inchikey_cofactor(inchikey):
                         substrate_inchikey.append(inchikey)
@@ -1056,6 +1075,8 @@ class EnzymeConstrainedModel(Data):
             logging.debug(f'substrate_inchikey: {substrate_inchikey}')
             logging.debug(f'species_name: {self.species_name}')
 
+            #these are all the combinations that we will use to try to fetch the
+            #closest kcat entry in the brenda database
             param_combinations = [
                 # Full set
                 {"species_name": self.species_name, "uniprot": uniprot, "substrate_inchikey": substrate_inchikey, "closest_taxonomy": False},
@@ -1326,89 +1347,6 @@ class EnzymeConstrainedModel(Data):
         return matches
 
 
-    """
-    def _find_exact_or_closest_filtered(
-            self,
-            input_value_inchikey,
-            input_all_entry_inchikeys,
-            inchikey_levels=3,
-            ):
-        def is_tuple_of_tuples(obj) -> bool:
-            return isinstance(obj, tuple) and all(isinstance(elem, tuple) for elem in obj)
-        if is_tuple_of_tuples(input_value_inchikey):
-            value_inchikey = input_value_inchikey
-        elif isinstance(input_value_inchikey, tuple):
-            value_inchikey = (input_value_inchikey,)
-        else:
-            return None
-        v = tuple([tuple(sorted([inchikey_layer_extract(y, inchikey_levels) for y in i if y])) for i in value_inchikey if i])
-        for searched_results_inchikey in input_all_entry_inchikeys:
-            s = tuple([tuple(sorted([inchikey_layer_extract(y, inchikey_levels) for y in i if y])) for i in searched_results_inchikey if i])
-            if v in s or v==s:
-                return searched_results_inchikey
-        return None
-    """
-    """
-    def _substrate_overlap_check(self, value_inchikey, searched_results_inchikey, inchikey_levels=3):
-        v = []
-        if isinstance(value_inchikey, list):
-            v = tuple(sorted([inchikey_layer_extract(i, inchikey_levels) for i in value_inchikey]))
-        elif isinstance(value_inchikey, str):
-            v = (inchikey_layer_extract(value_inchikey, inchikey_levels),)
-        elif isinstance(value_inchikey, tuple): 
-            v = tuple(sorted([inchikey_layer_extract(i, inchikey_levels) for i in value_inchikey]))
-        else:
-            raise TypeError(f'Cannot recognise the input type of value_inchikey {value_inchikey} -> {type(value_inchikey)}')
-        v = tuple(v)
-        s = tuple([tuple(sorted([inchikey_layer_extract(y, inchikey_levels) for y in i])) for i in searched_results_inchikey])
-        if v in s or v==s:
-            return True
-        return False
-    """
-
-    '''
-    def _find_exact_or_closest_filtered(
-            self,
-            input_value_inchikey,
-            input_all_entry_inchikeys,
-            inchikey_levels=3,
-            ):
-        """
-        Return the tuple in entry_inchikey that is either exactly equal to value_inchikey or the closest one,
-        but only if all elements of value_inchikey are present in the closest tuple.
-
-        value_inchikeyrgs:
-            value_inchikey (Tuple[float, ...]): Target tuple.
-            entry_inchikey (Tuple[Tuple[float, ...], ...]): Candidate tuples.
-
-        Returns:
-            Optional[Tuple[float, ...]]: Exact match or closest tuple; otherwise None.
-        """
-        value_inchikey = tuple([inchikey_layer_extract(i, layers=inchikey_levels) for i in input_value_inchikey])
-        all_entry_inchikeys = [tuple(tuple(inchikey_layer_extract(x, layers=inchikey_levels) for x in y if x) for y in i if y) for i in input_all_entry_inchikeys if i]
-        def jaccard_similarity(list1, list2):
-            intersection = len(list(set(list1).intersection(list2)))
-            union = (len(set(list1)) + len(set(list2))) - intersection
-            return float(intersection) / union
-        global_closest_value = None
-        global_closest_tuple = None
-        for entry_inchikey in all_entry_inchikeys:
-            if value_inchikey in entry_inchikey:
-                return entry_inchikey
-            distances = [jaccard_similarity(value_inchikey, i) for i in entry_inchikey]
-            closest_value = np.min(distances)
-            closest_index = int(np.argmin(distances))
-            closest_tuple = entry_inchikey[closest_index]
-            if not global_closest_value or closest_value<global_closest_value:
-                global_closest_value = closest_value
-                global_closest_tuple = entry_inchikey
-        if global_closest_value==0.0:
-            return None
-        if global_closest_value:
-            return global_closest_tuple
-    '''
-
-
     def _filter_kinetic_entry(
         self,
         input_entry_ec_number, 
@@ -1496,14 +1434,14 @@ class EnzymeConstrainedModel(Data):
             request = requests.post(sabiork_query_url, params=q)
         except Exception:
             time.sleep(sabiork_wait_time)
-            return pd.DataFrame()
+            return {}
         try:
             request.raise_for_status()
         except Exception:
             #logging.info("SABIO-RK API error with query:")
             #logging.info(query_string)
             time.sleep(sabiork_wait_time)
-            return pd.DataFrame()
+            return {}
         time.sleep(sabiork_wait_time)
         ### Parse the results
         df = pd.read_csv(StringIO(request.text), sep="\t")
@@ -1545,6 +1483,22 @@ class EnzymeConstrainedModel(Data):
         return result
 
 
+    def _get_species_name(
+        self,
+        taxid: int,
+    ) -> str:
+        """Return the species-level name from a taxonomy ID."""
+        ncbi = NCBITaxa()
+        lineage = ncbi.get_lineage(taxid)
+        names = ncbi.get_taxid_translator(lineage)
+        ranks = ncbi.get_rank(lineage)
+
+        for tid in lineage:
+            if ranks[tid] == "species":
+                return names[tid]
+        return names.get(taxid, "Unknown")
+
+
     def _rank_taxonomic_proximity(
         self,
         target: str, 
@@ -1560,11 +1514,10 @@ class EnzymeConstrainedModel(Data):
         Returns:
             A list of tuples (species_name_name, distance), sorted by ascending distance.
         """
-        if not self.ncbi:
-            self.ncbi = NCBITaxa()
+        ncbi = NCBITaxa()
         # Get taxids
         try:
-            target_taxid = self.ncbi.get_name_translator([target])[target][0]
+            target_taxid = ncbi.get_name_translator([target])[target][0]
         except KeyError:
             raise ValueError(f"Target species_name '{target}' not found.")
 
@@ -1572,14 +1525,14 @@ class EnzymeConstrainedModel(Data):
         for name in others:
             try:
                 if name not in other_taxids:
-                    other_taxids[name] = self.ncbi.get_name_translator([name])[name][0]
+                    other_taxids[name] = ncbi.get_name_translator([name])[name][0]
             except KeyError as e:
                 logging.warning(f"Organism not found: {e}")
 
         # Get full lineages
-        target_lineage = self.ncbi.get_lineage(target_taxid)
+        target_lineage = ncbi.get_lineage(target_taxid)
         lineages = {
-            name: self.ncbi.get_lineage(taxid)
+            name: ncbi.get_lineage(taxid)
             for name, taxid in other_taxids.items()
         }
 

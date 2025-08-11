@@ -4,7 +4,41 @@ import re
 import pickle
 import gzip
 import json
+import copy
 from rapidfuzz import process, fuzz
+
+
+def merge_annot_dicts(input_parent_dict: dict, child_dict: dict) -> dict:
+    """
+    Merges dictionary child_dict into dictionary input_parent_dict by:
+    - Adding elements from child_dict that do not exist in input_parent_dict.
+    - If an element is a list in both A and child_dict, adding only unique elements from child_dict's list to input_parent_dict's list.
+    - Ignoring elements in child_dict that are lists if input_parent_dict does not have them as lists.
+    - Ignoring elements that are dictionaries in child_dict.
+
+    Args:
+        input_parent_dict (dict): The base dictionary.
+        child_dict (dict): The dictionary to merge into A.
+
+    Returns:
+        dict: The updated dictionary input_parent_dict.
+
+    Example:
+        >>> A = {"x": 1, "y": "hello", "z": [1, 2, 3]}
+        >>> B = {"y": "world", "z": [3, 4, 5], "a": 100, "nested": {"key": "value"}}
+        >>> merge_dicts_with_list_update(A, B)
+        {'x': 1, 'y': 'hello', 'z': [1, 2, 3, 4, 5], 'a': 100}
+    """
+    parent_dict = copy.deepcopy(input_parent_dict)
+    for key, value in child_dict.items():
+        if isinstance(value, dict):  # Ignore dictionary values
+            continue
+        if key in parent_dict:
+            if isinstance(parent_dict[key], list) and isinstance(value, list):
+                parent_dict[key].extend([item for item in value if item not in parent_dict[key]])
+        elif not isinstance(value, list):
+            parent_dict[key] = value
+    return parent_dict
 
 # Write compressed dict to JSON
 def write_compressed_json(data: dict, filename: str) -> None:

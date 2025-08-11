@@ -1,14 +1,18 @@
 from cobra import Model, Reaction, Metabolite
-from cobra.io import read_sbml_model, write_sbml_model
-from typing import List, Tuple, Dict, Union, Optional
+#from cobra.io import read_sbml_model, save_json_model, load_json_model, write_sbml_model
+import cobra
+from typing import Any, List, Tuple, Dict, Union, Optional, Callable
+
 import pandas as pd
 import numpy as np
+import copy
 import os
+import gzip
 import itertools
 import logging
-
 from biopathopt import Data
 from biopathopt import utils
+from tqdm import tqdm
 
 """
 This is a collection of functions to build a model
@@ -17,7 +21,7 @@ This is a collection of functions to build a model
 
 class ModelBuilder(Data):
 
-    def __init__(self, path_to_model=None):
+    def __init__(self, path_to_model=None, use_progressbar=False):
         """Class that inherits Data used to build a cobra model
         """
         super().__init__()
@@ -51,6 +55,9 @@ class ModelBuilder(Data):
             'sabiorkM': 'sabiork',
             'lipidmapsM': 'lipidmaps',
             'SLM': 'slm',
+            'InChI': 'inchi',
+            'SMILES': 'smiles',
+            'InChIKey': 'inchi_key,'
         }
 
         # Manually created mapping to convert annotation IDs from MetaNetX to BiGG
@@ -63,23 +70,268 @@ class ModelBuilder(Data):
             'kegg.reaction': 'kegg.reaction',
             'rhea': 'rhea',
             'keggR': 'kegg.reaction',
+            'keggr': 'kegg.reaction',
             'sabiork.reaction': 'sabiork',
             'sabiorkR': 'sabiork',
             'seed.reaction': 'seed.reaction',
             'biggR': 'bigg.reaction',
+            'biggr': 'bigg.reaction',
             'bigg.reaction': 'bigg.reaction',
             'metacycR': 'metacyc.reaction',
             'ec': 'ec-code',
         }
 
+        self.gene_bigg_annot_convert = {
+            'UniProtKB': 'uniprot',
+        }
+
         if path_to_model:
-            self.model = read_sbml_model(path_to_model)
-            self._replace_depr_mnxm()
-            self._replace_dpr_mnxr()
+            self._read_model(path_to_model, use_progressbar)
         else:
             self.model = Model()
 
-    ## Default model parsing
+
+    def _read_model(self, path_to_model: str, use_progressbar: bool = False):
+        #read if gzip , sbml or json
+        if path_to_model.endswith('json.gz') or path_to_model.endswith('json.gzip'):
+            with gzip.open(path_to_model, 'rt', encoding='utf-8') as gz_file:
+                self.model = cobra.io.load_json_model(gz_file)
+        elif path_to_model.endswith('json'):
+            self.model = cobra.io.load_json_model(path_to_model)
+        elif path_to_model.endswith('sbml') or path_to_model.endswith('xml'):
+            self.model = cobra.io.read_sbml_model(path_to_model)
+        else:
+            raise TypeError('Cannot recognise the input file extension')
+        if not 'biopathopt_enriched' in self.model.annotation:
+            #replace deprecated metanetx ids
+            logging.info('Replacing deprecated MXNM')
+            self._replace_depr_mnxm()
+            self._replace_dpr_mnxr()
+            #update the metabolite annotation keys
+            #TODO
+            #update the reactions annotation keys
+            #TODO
+            #update the metabolite annotations
+            met_iterator = tqdm(self.model.metabolites, desc='Updating the metabolite annotations') if use_progressbar else self.model.metabolites
+            for m in met_iterator:
+                m.annotation = utils.merge_annot_dicts(m.annotation, self._find_metabolite_xref(m.annotation))
+            #BUG: remove nan or None
+            for m in self.model.reactions:
+                annot = m.annotation
+                updated_annot = copy.deepcopy(annot)
+                for i in annot:
+                    if pd.isna(i) or i is None:
+                        _ = updated_annot.pop(i, None)
+                    if isinstance(annot[i], list):
+                        updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
+                        updated_annot[i] = [y for y in updated_annot[i] if y is not None]
+                    elif pd.isna(annot[i]) or i is None: 
+                        _ = updated_annot.pop(i, None)
+                m.annotation = updated_annot
+            #update the reaction annotations
+            reac_iterator = tqdm(self.model.reactions, desc='Updating the reaction annotations') if use_progressbar else self.model.reactions
+            for r in reac_iterator:
+                r.annotation = utils.merge_annot_dicts(r.annotation, self._find_reaction_xref(r.annotation))
+            #BUG: remove nan or None
+            for r in self.model.reactions:
+                annot = r.annotation
+                updated_annot = copy.deepcopy(annot)
+                for i in annot:
+                    if pd.isna(i) or i is None:
+                        _ = updated_annot.pop(i, None)
+                    if isinstance(annot[i], list):
+                        updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
+                        updated_annot[i] = [y for y in updated_annot[i] if y is not None]
+                    elif pd.isna(annot[i]) or i is None: 
+                        _ = updated_annot.pop(i, None)
+                r.annotation = updated_annot
+            #update the gene annotations
+            #TODO
+            self.model.annotation['biopathopt_enriched'] = True
+
+
+    def save_model(self, file_path: str) -> None:
+        """
+        Save a COBRApy model to a gzip-compressed JSON file.
+
+        Args:
+            file_path (str): Path to output .json.gz file.
+
+        Returns:
+            None
+        """
+        if file_path.endswith('json.gz') or file_path.endswith('json.gzip'):
+            json_str = cobra.io.to_json(self.model)  # serialize model to JSON string
+            with gzip.open(file_path, 'wt', encoding='utf-8') as f:
+                f.write(json_str)    
+        elif file_path.endswith('json'):
+            cobra.io.save_json_model(self.model, file_path)
+        elif file_path.endswith('sbml') or file_path.endswith('.xml'):
+            cobra.io.write_sbml_model(self.model, file_path)
+        else:
+            raise TypeError('Cannot recognize the output file type')
+
+
+    #################### Parse the model ##################
+    # These functions are to be run when reading a model
+    # to make sure that models are consistent when using them
+
+    def _find_reaction_xref(self, r_annotation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Attempts to find and enrich cross-references for a metabolite using multiple identifiers
+        (InChIKey, MetaNetX, KEGG, BiGG) and data sources.
+
+        Args:
+            r_annotation (Optional[Dict[str, Any]]): Annotation dictionary of a reaction.
+
+        Returns:
+            Dict[str, Any]: A dictionary of enriched cross-references if found; otherwise empty.
+        """
+        def search_xref(uid: Union[str, list], data_search: Callable[[str], tuple]) -> Dict[str, Any]:
+            """
+            Searches a single identifier or a list of identifiers using the provided search function.
+
+            Args:
+                uid (Union[str, list]): Identifier or list of identifiers.
+                data_search (Callable[[str], tuple]): Function returning (xref_dict, matched_id).
+
+            Returns:
+                Dict[str, Any]: The xref dictionary, or empty if not found.
+            """
+            if isinstance(uid, list):
+                for i in uid:
+                    xref, _ = data_search(i)
+                    return xref
+            elif isinstance(uid, str):
+                xref, _ = data_search(uid)
+                return xref
+            else:
+                logging.warning(f'Cannot find type of {uid}')
+            return {}
+
+        if r_annotation:
+            mnxr = r_annotation.get('metanetx.reaction')
+            if mnxr:
+                xref = search_xref(mnxr, self.mnxr_xref)
+                if xref:
+                    return xref     
+            keggr = r_annotation.get('kegg.reaction')
+            if keggr:
+                xref = search_xref(keggr, self.keggr_xref)
+                if xref:
+                    return xref   
+            biggr = r_annotation.get('bigg.reaction')
+            if not biggr:
+                biggr = r_annotation.get('biggr')
+            if not biggr:
+                biggr = r_annotation.get('biggR')
+            if biggr:
+                xref = search_xref(biggr, self.biggr_xref)
+                if xref:
+                    return xref
+        return {}
+
+    
+    def _find_metabolite_xref(self, m_annotation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Attempts to find and enrich cross-references for a metabolite using multiple identifiers
+        (InChIKey, MetaNetX, KEGG, BiGG) and data sources.
+
+        Args:
+            m_annotation (Optional[Dict[str, Any]]): Annotation dictionary of a metabolite.
+
+        Returns:
+            Dict[str, Any]: A dictionary of enriched cross-references if found; otherwise empty.
+        """
+        def search_xref(uid: Union[str, list], data_search: Callable[[str], tuple]) -> Dict[str, Any]:
+            """
+            Searches a single identifier or a list of identifiers using the provided search function.
+
+            Args:
+                uid (Union[str, list]): Identifier or list of identifiers.
+                data_search (Callable[[str], tuple]): Function returning (xref_dict, matched_id).
+
+            Returns:
+                Dict[str, Any]: The xref dictionary, or empty if not found.
+            """
+            if isinstance(uid, list):
+                for i in uid:
+                    xref, _ = data_search(i)
+                    return xref
+            elif isinstance(uid, str):
+                xref, _ = data_search(uid)
+                return xref
+            else:
+                logging.warning(f'Cannot find type of {uid}')
+            return {}
+
+        def enrich_xref(xref_dict: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Extracts and enriches standard cross-reference fields from a raw xref result.
+
+            Args:
+                xref_dict (Dict[str, Any]): Raw xref data.
+
+            Returns:
+                Dict[str, Any]: Cleaned and enriched xref dictionary.
+            """
+            if xref_dict:
+                try:
+                    to_ret = xref_dict['xref']
+                    for i in to_ret:
+                        #TODO: remove nan in the annotations instead of doing this
+                        if pd.isna(i) or str(i).lower()=='nan':
+                            to_ret.pop(i, None)
+                        else:
+                            if isinstance(to_ret[i], list):
+                                to_ret[i] = [y for y in to_ret[i] if not pd.isna(y)]
+                                to_ret[i] = [y for y in to_ret[i] if str(y).lower() != 'nan']
+                            elif pd.isna(to_ret[i]):
+                                to_ret[i] = ''
+                except KeyError:
+                    return {}
+                #TODO: remove any xref entries that are nan
+                try:
+                    if not pd.isna(xref_dict['SMILES']) and not xref_dict['SMILES'].lower()=='nan':
+                        to_ret['smiles'] = xref_dict['SMILES']
+                except KeyError:
+                    pass
+                try:
+                    if not pd.isna(xref_dict['InChI']) and not xref_dict['InChI'].lower()=='nan':
+                        to_ret['inchi'] = xref_dict['InChI']
+                except KeyError:
+                    pass
+                try:
+                    if not pd.isna(xref_dict['InChIKey']) and not xref_dict['InChIKey'].lower()=='nan':
+                        to_ret['inchi_key'] = xref_dict['InChIKey']
+                except KeyError:
+                    pass
+                return to_ret
+            return {}
+
+        if m_annotation:
+            inchikey = m_annotation.get('inchi_key')
+            if inchikey:
+                xref = enrich_xref(search_xref(inchikey, self.inchikey_xref))
+                if xref:
+                    return xref
+            mnxm = m_annotation.get('metanetx.chemical')
+            if mnxm:
+                xref = enrich_xref(search_xref(mnxm, self.mnxm_xref))
+                if xref:
+                    return xref     
+            keggm = m_annotation.get('kegg.compound')
+            if keggm:
+                xref = enrich_xref(search_xref(keggm, self.keggm_xref))
+                if xref:
+                    return xref   
+            biggm = m_annotation.get('bigg.metabolite')
+            if biggm:
+                xref = enrich_xref(search_xref(biggm, self.biggm_xref))
+                if xref:
+                    return xref
+        return {}
+
 
     def _replace_depr_mnxm(self) -> None:
         """
@@ -105,6 +357,7 @@ class ModelBuilder(Data):
                 elif isinstance(metabolite.annotation['metanetx.chemical'], str):
                     # Update the annotation for a single string
                     metabolite.annotation['metanetx.chemical'] = self.single_depr_mnxm(metabolite.annotation['metanetx.chemical'])
+
 
     def _replace_dpr_mnxr(self) -> None:
         """
@@ -133,10 +386,6 @@ class ModelBuilder(Data):
     #TODO: add a method that loops through all the ec-code of the model and 
     #finds the one that uses the substrates that is described in the model (or the closest one)
     
-    ## Save the model ##
-
-    def save_model(self, path_to_save: str):
-        write_sbml_model(self.model, path_to_save)
 
     ## Query the model ##
 

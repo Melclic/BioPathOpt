@@ -57,15 +57,15 @@ class KcatPredictor(Data):
         """
 
         super().__init__()
-        self.edge_dict = load_pickle(f'./data/edge_dict.pickle')
-        self.fingerprint_dict = load_pickle(f'./data/fingerprint_dict.pickle')
-        self.atom_dict = load_pickle(f'./data/atom_dict.pickle')
-        self.bond_dict = load_pickle(f'./data/bond_dict.pickle')
-        self.word_dict = load_pickle(f'./data/sequence_dict.pickle')
+        self.edge_dict = load_pickle(os.path.join(self.base_dir, 'flatfiles/non_generative_data/edge_dict.pickle'))
+        self.fingerprint_dict = load_pickle(os.path.join(self.base_dir, 'flatfiles/non_generative_data/fingerprint_dict.pickle'))
+        self.atom_dict = load_pickle(os.path.join(self.base_dir, 'flatfiles/non_generative_data/atom_dict.pickle'))
+        self.bond_dict = load_pickle(os.path.join(self.base_dir, 'flatfiles/non_generative_data/bond_dict.pickle'))
+        self.word_dict = load_pickle(os.path.join(self.base_dir, 'flatfiles/non_generative_data/sequence_dict.pickle'))
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         torch.manual_seed(1234)
-        torch_model_path = f'./data/all--radius{radius}--ngram{ngram}--dim{dim}--layer_gnn{layer_gnn}--window{window}--layer_cnn{layer_cnn}--layer_output{layer_output}--lr{"{:.0e}".format(lr).replace("e-0", "e-").replace("e+0", "e+") }--lr_decay{lr_decay}--decay_interval{decay_interval}--weight_decay{"{:.0e}".format(weight_decay).replace("e-0", "e-").replace("e+0", "e+")}--iteration{iteration}'
+        torch_model_path = os.path.join(self.base_dir, f'flatfiles/non_generative_data/all--radius{radius}--ngram{ngram}--dim{dim}--layer_gnn{layer_gnn}--window{window}--layer_cnn{layer_cnn}--layer_output{layer_output}--lr{"{:.0e}".format(lr).replace("e-0", "e-").replace("e+0", "e+") }--lr_decay{lr_decay}--decay_interval{decay_interval}--weight_decay{"{:.0e}".format(weight_decay).replace("e-0", "e-").replace("e+0", "e+")}--iteration{iteration}')
         #kcat_model.load_state_dict(torch.load(f'{run_file}data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50', map_location=device))
         if not os.path.isfile(torch_model_path):
             raise FileNotFoundError(f'Could not find {torch_model_path}')
