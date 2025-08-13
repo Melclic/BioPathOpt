@@ -26,6 +26,7 @@ class ModelBuilder(Data):
         """
         super().__init__()
         # Manually created mapping to convert annotation IDs from MetaNetX to BiGG or other standards
+        self.model = None
         self.mnxm_bigg_annot_convert = {
             'CHEBI': 'chebi',
             'metacyc.compound': 'metacyc.compound',
@@ -95,66 +96,62 @@ class ModelBuilder(Data):
         #read if gzip , sbml or json
         if path_to_model.endswith('json.gz') or path_to_model.endswith('json.gzip'):
             with gzip.open(path_to_model, 'rt', encoding='utf-8') as gz_file:
-                tmp_model = cobra.io.load_json_model(gz_file)
+                self.model = cobra.io.load_json_model(gz_file)
         elif path_to_model.endswith('json'):
-            tmp_model = cobra.io.load_json_model(path_to_model)
+            self.model = cobra.io.load_json_model(path_to_model)
         elif path_to_model.endswith('sbml') or path_to_model.endswith('xml'):
-            tmp_model = cobra.io.read_sbml_model(path_to_model)
+            self.model = cobra.io.read_sbml_model(path_to_model)
         else:
             raise TypeError('Cannot recognise the input file extension')
-        if 'enzyme_constrain' in tmp_model.annotation.annotation:
-            self.ec_model = tmp_model
-        else:
-            self.model = tmp_model
-            if not 'biopathopt_enriched' in self.model.annotation:
-                #replace deprecated metanetx ids
-                logging.info('Replacing deprecated MXNM')
-                self._replace_depr_mnxm()
-                self._replace_dpr_mnxr()
-                #update the metabolite annotation keys
-                #TODO
-                #update the reactions annotation keys
-                #TODO
-                #update the metabolite annotations
-                met_iterator = tqdm(self.model.metabolites, desc='Updating the metabolite annotations') if use_progressbar else self.model.metabolites
-                for m in met_iterator:
-                    m.annotation = utils.merge_annot_dicts(m.annotation, self._find_metabolite_xref(m.annotation))
-                #BUG: remove nan or None
-                for m in self.model.reactions:
-                    annot = m.annotation
-                    updated_annot = copy.deepcopy(annot)
-                    for i in annot:
-                        if pd.isna(i) or i is None:
-                            _ = updated_annot.pop(i, None)
-                        if isinstance(annot[i], list):
-                            updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
-                            updated_annot[i] = [y for y in updated_annot[i] if y is not None]
-                        elif pd.isna(annot[i]) or i is None: 
-                            _ = updated_annot.pop(i, None)
-                    m.annotation = updated_annot
-                #update the reaction annotations
-                reac_iterator = tqdm(self.model.reactions, desc='Updating the reaction annotations') if use_progressbar else self.model.reactions
-                for r in reac_iterator:
-                    r.annotation = utils.merge_annot_dicts(r.annotation, self._find_reaction_xref(r.annotation))
-                #BUG: remove nan or None
-                for r in self.model.reactions:
-                    annot = r.annotation
-                    updated_annot = copy.deepcopy(annot)
-                    for i in annot:
-                        if pd.isna(i) or i is None:
-                            _ = updated_annot.pop(i, None)
-                        if isinstance(annot[i], list):
-                            updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
-                            updated_annot[i] = [y for y in updated_annot[i] if y is not None]
-                        elif pd.isna(annot[i]) or i is None: 
-                            _ = updated_annot.pop(i, None)
-                    r.annotation = updated_annot
-                #update the gene annotations
-                #TODO
-                self.model.annotation['biopathopt_enriched'] = True
+        if not 'biopathopt_enriched' in self.model.annotation:
+            #replace deprecated metanetx ids
+            logging.info('Replacing deprecated MXNM')
+            self._replace_depr_mnxm()
+            self._replace_dpr_mnxr()
+            #update the metabolite annotation keys
+            #TODO
+            #update the reactions annotation keys
+            #TODO
+            #update the metabolite annotations
+            met_iterator = tqdm(self.model.metabolites, desc='Updating the metabolite annotations') if use_progressbar else self.model.metabolites
+            for m in met_iterator:
+                m.annotation = utils.merge_annot_dicts(m.annotation, self._find_metabolite_xref(m.annotation))
+            #BUG: remove nan or None
+            for m in self.model.reactions:
+                annot = m.annotation
+                updated_annot = copy.deepcopy(annot)
+                for i in annot:
+                    if pd.isna(i) or i is None:
+                        _ = updated_annot.pop(i, None)
+                    if isinstance(annot[i], list):
+                        updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
+                        updated_annot[i] = [y for y in updated_annot[i] if y is not None]
+                    elif pd.isna(annot[i]) or i is None: 
+                        _ = updated_annot.pop(i, None)
+                m.annotation = updated_annot
+            #update the reaction annotations
+            reac_iterator = tqdm(self.model.reactions, desc='Updating the reaction annotations') if use_progressbar else self.model.reactions
+            for r in reac_iterator:
+                r.annotation = utils.merge_annot_dicts(r.annotation, self._find_reaction_xref(r.annotation))
+            #BUG: remove nan or None
+            for r in self.model.reactions:
+                annot = r.annotation
+                updated_annot = copy.deepcopy(annot)
+                for i in annot:
+                    if pd.isna(i) or i is None:
+                        _ = updated_annot.pop(i, None)
+                    if isinstance(annot[i], list):
+                        updated_annot[i] = [y for y in annot[i] if not pd.isna(y)]
+                        updated_annot[i] = [y for y in updated_annot[i] if y is not None]
+                    elif pd.isna(annot[i]) or i is None: 
+                        _ = updated_annot.pop(i, None)
+                r.annotation = updated_annot
+            #update the gene annotations
+            #TODO
+            self.model.annotation['biopathopt_enriched'] = True
 
 
-    def save_model(self, file_path: str, input_model: cobrapy.Model) -> None:
+    def save_model(self, file_path: str, input_model: cobra.Model = None) -> None:
         """
         Save a COBRApy model to a gzip-compressed JSON file.
 

@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.express as px
 from plotly.graph_objects import Figure
 
-def plot_cdf(
+def cdf(
     values: Sequence[float],
     title: str = "Empirical CDF",
     x_label: str = "Value",
@@ -65,4 +65,49 @@ def plot_cdf(
     fig.update_layout(margin=dict(l=40, r=20, t=60, b=40))
     fig.update_xaxes(exponentformat = 'power')
     fig.add_hline(y=0.5, line_width=3, line_dash="dash", line_color="gray")
+    return fig
+
+def predicted_v_sim(
+    df,
+    measured_col,
+    sim_col,
+    name_col,
+    width = 1200,
+    height = 800,
+    title: str = "Predicted vs Measured",
+):
+    # Determine plot limits
+    min_val = min(df[measured_col].min(), df[sim_col].min())
+    max_val = max(df[measured_col].max(), df[sim_col].max())
+
+    # Create scatter plot
+    fig = px.scatter(
+        df,
+        x=measured_col,
+        y=sim_col,
+        title=title,
+        color=name_col,
+        text=name_col,
+        labels={measured_col: "Measured", sim_col: "Predicted", name_col: "Substrate"},
+        width=width,
+        height=height,
+    )
+
+    # Add perfect correlation line
+    fig.add_shape(
+        type="line",
+        x0=min_val, y0=min_val,
+        x1=max_val, y1=max_val,
+        line=dict(color="gray", dash="dash"),
+        name="Perfect correlation",
+
+    )
+
+    # Adjust text placement and make markers bigger
+    fig.update_traces(
+        textposition="top center",
+        marker=dict(size=14, opacity=0.85)
+    )
+
+    #fig.update_layout(template="plotly_white")
     return fig

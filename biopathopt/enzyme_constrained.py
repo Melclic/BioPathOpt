@@ -49,18 +49,19 @@ class EnzymeConstrainedModel(ModelBuilder):
         super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar)
         #TODO: print the stats of uniprot, structure, etc... so that we can
         # give a warning if the coverage is too low
-        self.taxonomy_id = None
-        self.ec_model = None
         self.species_name = species_name
-        if species_name and not taxonomy_id:
+        self.taxonomy_id = taxonomy_id
+        self.ec_model = None
+        if not self.taxonomy_id:
+            if self.model:
+                self.taxonomy_id = self.model.annotation.get('taxonomy', None)
+        if species_name and not self.taxonomy_id:
             self.taxonomy = self._get_taxid_from_species(species_name)
-        if taxonomy_id and not species_name:
-            self.species_name = self._get_species_name(taxonomy_id)
-        if not self.species_name and not self.taxonomy_id:
-            taxid = self.model.annotation.get('taxonomy', None)
-            if taxid:
-                self.taxonomy_id = taxid
-                self.species_name = self._get_species_name(taxid)
+        if self.taxonomy_id and not species_name:
+            self.species_name = self._get_species_name(self.taxonomy_id)
+        if self.model:
+            if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
+                self.model.annotation['taxonomy'] = self.taxonomy_id
         #TODO: Add the taxonomy id and species name in the model annotation
         self.brenda_ec_G = self._json_brenda_to_G()
         self.cofactors_inchikey_layers3 = []
@@ -79,27 +80,6 @@ class EnzymeConstrainedModel(ModelBuilder):
         self.mnxr_cofactor_transport = ['MNXR146072', 'MNXR02', 'MNXR99522', 'MNXR101670', 'MNXR96810', 'MNXR99505', 'MNXR100495', 'MNXR105280', 'MNXR101507', 'MNXR96436', 'MNXR104460', 'MNXR101958', 'MNXR191149', 'MNXR96951', 'MNXR100625', 'MNXR96499', 'MNXR98640', 'MNXR98641', 'MNXR101912', 'MNXR101950', 'MNXR104469', 'MNXR100950', 'MNXR101804', 'MNXR102090', 'MNXR191153', 'MNXR142917', 'MNXR96954', 'MNXR104456', 'MNXR96797', 'MNXR145749', 'MNXR155386', 'MNXR96821']
 
 
-    ### methods that overwrite it
-
-
-    def _read_model(self, path_to_model: str, use_progressbar: bool = False):
-
-
-    def save_model(self, file_path: str, save_ec=True) -> None:
-        """
-        Save the enzyme COBRApy model to a gzip-compressed JSON file.
-
-        Args:
-            file_path (str): Path to output .json.gz file.
-
-        Returns:
-            None
-        """
-        if save_ec:
-            super().save_model(file_path=file_path, input_model=self.ec_model)
-        else:
-            super().save_model(file_path=file_path, input_model=self.model)
- 
     #### get the ecModel
 
     def return_ec_model(
@@ -161,6 +141,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         ec_model.add_cons_vars(constraint)
         ec_model.solver.update()
         constraint.set_linear_coefficients(coefficients=coefficients)
+        self.ec_model = ec_model
         return ec_model
 
 
@@ -369,6 +350,7 @@ class EnzymeConstrainedModel(ModelBuilder):
             use_progressbar: bool = False):
         if species_name:
             self.species_name = species_name
+        #TODO: remove this since its redundant with the constructor
         if taxonomy_id:
             self.taxonomy_id = taxonomy_id
         if not self.species_name and not self.taxonomy_id:

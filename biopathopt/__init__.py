@@ -3,7 +3,10 @@ from .cache_data import Data
 from .model_builder import ModelBuilder
 from .enzyme_constrained import EnzymeConstrainedModel
 from .dlkcat import KcatPredictor, KcatPrediction
-from .utils import *
+
+from . import utils as utils
+from . import plots as plots
+
 import logging
 
 logging.basicConfig(
@@ -22,4 +25,6 @@ __all__ = [
     'EnzymeConstrainedModel',
     'KcatPredictor',
     'KcatPrediction',
+    'utils',
+    'plots',
 ]
