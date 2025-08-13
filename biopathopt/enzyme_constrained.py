@@ -6,6 +6,7 @@ import pandas as pd
 import json
 import xmltodict
 from bioservices import UniProt
+import cobra
 from cobra import Model, Reaction
 from cobra.util.solver import set_objective
 from cobra.flux_analysis import pfba
@@ -19,6 +20,7 @@ import numpy as np
 import logging
 from tqdm import tqdm
 from rapidfuzz.distance import Levenshtein
+import gzip
 
 from typing import List, Union, Dict, Optional, Tuple, Any
 
@@ -76,6 +78,27 @@ class EnzymeConstrainedModel(ModelBuilder):
                 pass
         self.mnxr_cofactor_transport = ['MNXR146072', 'MNXR02', 'MNXR99522', 'MNXR101670', 'MNXR96810', 'MNXR99505', 'MNXR100495', 'MNXR105280', 'MNXR101507', 'MNXR96436', 'MNXR104460', 'MNXR101958', 'MNXR191149', 'MNXR96951', 'MNXR100625', 'MNXR96499', 'MNXR98640', 'MNXR98641', 'MNXR101912', 'MNXR101950', 'MNXR104469', 'MNXR100950', 'MNXR101804', 'MNXR102090', 'MNXR191153', 'MNXR142917', 'MNXR96954', 'MNXR104456', 'MNXR96797', 'MNXR145749', 'MNXR155386', 'MNXR96821']
 
+
+    ### methods that overwrite it
+
+
+    def _read_model(self, path_to_model: str, use_progressbar: bool = False):
+
+
+    def save_model(self, file_path: str, save_ec=True) -> None:
+        """
+        Save the enzyme COBRApy model to a gzip-compressed JSON file.
+
+        Args:
+            file_path (str): Path to output .json.gz file.
+
+        Returns:
+            None
+        """
+        if save_ec:
+            super().save_model(file_path=file_path, input_model=self.ec_model)
+        else:
+            super().save_model(file_path=file_path, input_model=self.model)
  
     #### get the ecModel
 
@@ -95,14 +118,27 @@ class EnzymeConstrainedModel(ModelBuilder):
         except KeyError:
             logging.error(f'Cannot recognise input substrate reaction id {substrate_exchange_reaction_id}')
             return None
-        self._convert_to_irreversible(ec_model, substrate_exchange_reaction)
+        #save the original reaction ids
+        for r in ec_model.reactions:
+            r.annotation['original_id'] = r.id
+        #NOTE the order of the two function matters. 
+        """
+        Option 1: Run the isoenzyme split first and then make the whole system 
+        irreversible. This converges to a solution faster when optimizing... 
+        not sure why
+        Option 2: (default in original ECMpy) Turn reactions irreversible first
+        and then generate isoenzyme split. This does not find 0.66 after 50 iterations
+        when optimizing 
+        """
         self._isoenzyme_split(ec_model)
+        self._convert_to_irreversible(ec_model, substrate_exchange_reaction)
+        #self._isoenzyme_split(ec_model)
         #set model level paramters
         if not lowerbound:
             lowerbound = 0
         if not upperbound:
             upperbound = round(protein_fraction * enzyme_mass_fraction * enzyme_saturation, 3)
-        ec_model.annotation['enzyme_constraint'] = {
+        ec_model.annotation['enzyme_constrain'] = {
             'enzyme_mass_fraction': enzyme_mass_fraction, 
             'total_protein_fraction': protein_fraction,
             'average_saturation': enzyme_saturation, 
@@ -253,6 +289,7 @@ class EnzymeConstrainedModel(ModelBuilder):
                 progress.set_description(f"Growth Rate is {model_gr}")
                 progress.update(1)
             logging.debug(f'-------------- {model_gr} ---------------')
+        self.ec_model = ec_model
         return updated_reacs
 
 
@@ -266,6 +303,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         self._get_uniprot_aaseq_mw(use_progressbar=use_progressbar)
         self.calculate_dlkcat(use_progressbar=use_progressbar)
         self.database_kcat(species_name=species_name, taxonomy_id=taxonomy_id, use_progressbar=use_progressbar)
+        self._set_kcat()
 
 
 
@@ -350,7 +388,6 @@ class EnzymeConstrainedModel(ModelBuilder):
                 use_progressbar=use_progressbar,
             )
         self._calculate_mw_kcat()
-        self._set_kcat()
 
 
     def calculate_enzyme_mass_fraction(self, gene_abundance_csv_path, abundance_colname, name_colname, model_gene_name_feature):
