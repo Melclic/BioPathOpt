@@ -34,6 +34,8 @@ Includes methods to fetch kcat from MIRIAM annotation and sMOMENT definition
 and other
 
 TODO: change such that all use taxonomy instead of species name
+
+NOTE: taken from the https://github.com/tibbdc/ECMpy project and modified
 """
 
 import warnings
@@ -45,13 +47,13 @@ warnings.filterwarnings(
 
 class EnzymeConstrainedModel(ModelBuilder):
     
-    def __init__(self, path_to_model: str, species_name=None, taxonomy_id=None, use_progressbar: bool = False):
+    def __init__(self, path_to_model: str, species_name=None, taxonomy_id=None, use_progressbar: bool = False, gene_uniprot_annotation_name: str = 'uniprot'):
         super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar)
         #TODO: print the stats of uniprot, structure, etc... so that we can
         # give a warning if the coverage is too low
+        self._check_gene_uniprot(gene_uniprot_annotation_name=gene_uniprot_annotation_name)
         self.species_name = species_name
         self.taxonomy_id = taxonomy_id
-        self.ec_model = None
         if not self.taxonomy_id:
             if self.model:
                 self.taxonomy_id = self.model.annotation.get('taxonomy', None)
@@ -63,24 +65,26 @@ class EnzymeConstrainedModel(ModelBuilder):
             if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
                 self.model.annotation['taxonomy'] = self.taxonomy_id
         #TODO: Add the taxonomy id and species name in the model annotation
-        self.brenda_ec_G = self._json_brenda_to_G()
+        self.brenda_ec_G = None
         self.cofactors_inchikey_layers3 = []
         self.cofactors_inchikey_layers2 = []
-        path_file = os.path.join(
-            self.base_dir, "flatfiles/EC_kcat_max.json"
-        )
-        self.brenda_kcat_max = json.load(open(path_file))
-        for mnxm in self.mnxm_cofactors:
-            try:
-                inchikey = self.mnxm_inchikey[mnxm]
-                self.cofactors_inchikey_layers3.append(inchikey)
-                self.cofactors_inchikey_layers2.append('-'.join(inchikey.split('-')[:-1]))
-            except KeyError:
-                pass
+        self.brenda_kcat_max = {}
         self.mnxr_cofactor_transport = ['MNXR146072', 'MNXR02', 'MNXR99522', 'MNXR101670', 'MNXR96810', 'MNXR99505', 'MNXR100495', 'MNXR105280', 'MNXR101507', 'MNXR96436', 'MNXR104460', 'MNXR101958', 'MNXR191149', 'MNXR96951', 'MNXR100625', 'MNXR96499', 'MNXR98640', 'MNXR98641', 'MNXR101912', 'MNXR101950', 'MNXR104469', 'MNXR100950', 'MNXR101804', 'MNXR102090', 'MNXR191153', 'MNXR142917', 'MNXR96954', 'MNXR104456', 'MNXR96797', 'MNXR145749', 'MNXR155386', 'MNXR96821']
 
 
     #### get the ecModel
+
+    def _check_gene_uniprot(self, gene_uniprot_annotation_name='uniprot'):
+        # Check gene coverage
+        count_uniprot_id = 0
+        for g in self.model.genes:
+            if g.annotation.get(gene_uniprot_annotation_name):
+                count_uniprot_id += 1
+                if gene_uniprot_annotation_name!='uniprot':
+                    g.annotation['uniprot'] = g.annotation.get(gene_uniprot_annotation_name)
+        gene_coverage = count_uniprot_id / len(self.model.genes)
+        assert gene_coverage > 0.33, f"The coverage of genes is too low ({gene_coverage*100:.1f}%), it's not recommended to construct an enzyme-constrained model. Please add 'uniprot' annotations to genes manually"
+
 
     def return_ec_model(
             self,
@@ -91,7 +95,7 @@ class EnzymeConstrainedModel(ModelBuilder):
             enzyme_saturation: float = 1.0,
             lowerbound: int = None,
             upperbound: int = None,
-            overwrite_kcat: dict  = {}):
+            ):
         ec_model = copy.deepcopy(self.model)
         try:
             substrate_exchange_reaction = ec_model.reactions.get_by_id(substrate_exchange_reaction_id)
@@ -127,6 +131,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         }
         #set model coefficients
         coefficients = {}
+        overwrite_kcat = ec_model.annotation.get('overwrite_kcat', {})
         for r in ec_model.reactions:
             try:
                 if r.id in overwrite_kcat:
@@ -141,7 +146,6 @@ class EnzymeConstrainedModel(ModelBuilder):
         ec_model.add_cons_vars(constraint)
         ec_model.solver.update()
         constraint.set_linear_coefficients(coefficients=coefficients)
-        self.ec_model = ec_model
         return ec_model
 
 
@@ -173,9 +177,11 @@ class EnzymeConstrainedModel(ModelBuilder):
             extracellular_compartment_id=extracellular_compartment_id,
             substrate_concentration=substrate_concentration,)
         """
+        #### initialize
         #logging.info(f'The carbon reaction is: {carbon_reac.id}')
         if carbon_exchange_reaction not in self.model.reactions:
             raise KeyError(f'The reaction {carbon_exchange_reaction} does not exist in the model')
+        self.model.annotation['overwrite_kcat'] = {}
         ec_model = self.return_ec_model(
                 substrate_exchange_reaction_id=carbon_exchange_reaction,
                 substrate_concentration=substrate_concentration,
@@ -189,7 +195,13 @@ class EnzymeConstrainedModel(ModelBuilder):
             if model_objective not in ec_model.reactions:
                 raise KeyError(f'The objective {model_objective} does not exist')
             ec_model.obj = model_objective
-
+        if not self.brenda_kcat_max:
+            self.brenda_kcat_max = json.load(open(
+                os.path.join(
+                        self.base_dir, "flatfiles/EC_kcat_max.json"
+                    )
+                ))
+        #### calculate default 
         pfba_sol = pfba(ec_model)
         reaction_E = {}
         #given these constrains run and calculate E
@@ -206,17 +218,17 @@ class EnzymeConstrainedModel(ModelBuilder):
         logging.debug('sorted_enz_ratio: {sorted_enz_ratio}')
         model_gr = ec_model.slim_optimize()
         logging.debug(f'-------------- {model_gr} ---------------')
-        updated_reacs = []
         #while not np.isclose(model_gr, target_growth_rate_h, rtol=rtol, atol=atol):
         if use_progressbar:
             progress = tqdm(total=maximum_optimization_rounds, desc=f'Growth rate is {model_gr}')
         num_round = 0
         new_kcat = {}
+        tried_reactions = []
         while (model_gr<target_growth_rate_h and num_round<maximum_optimization_rounds):
             #select the next reaction
             select_reaction = None
             for s_r, e_ratio in sorted_enz_ratio:
-                if s_r not in updated_reacs:
+                if s_r not in tried_reactions:
                     select_reaction = s_r
                     break
             logging.debug(f'select_reaction: {select_reaction}')
@@ -252,6 +264,9 @@ class EnzymeConstrainedModel(ModelBuilder):
                     except ZeroDivisionError:
                         pass
             #### update the coefficients
+            tried_reactions.append(select_reaction)
+            self.model.annotation['overwrite_kcat'] = new_kcat
+            ec_model.annotation['overwrite_kcat'] = new_kcat
             ec_model = self.return_ec_model(
                     substrate_exchange_reaction_id=carbon_exchange_reaction,
                     substrate_concentration=substrate_concentration,
@@ -260,18 +275,15 @@ class EnzymeConstrainedModel(ModelBuilder):
                     enzyme_saturation=enzyme_saturation,
                     lowerbound=lowerbound,
                     upperbound=upperbound,
-                    overwrite_kcat=new_kcat,
                 )
             ### update the results
-            updated_reacs.append(select_reaction)
             model_gr = ec_model.slim_optimize()
             num_round += 1
             if use_progressbar:
                 progress.set_description(f"Growth Rate is {model_gr}")
                 progress.update(1)
             logging.debug(f'-------------- {model_gr} ---------------')
-        self.ec_model = ec_model
-        return updated_reacs
+        return new_kcat
 
 
     def enzyme_enrich_model(
@@ -1239,6 +1251,8 @@ class EnzymeConstrainedModel(ModelBuilder):
         """
         current = node
         visited = set()
+        if not self.brenda_ec_G:
+            self.brenda_ec_G = self._json_brenda_to_G()
         if node not in self.brenda_ec_G:
             raise KeyError(f'{node} is not in the graph')
         while True:
@@ -1252,6 +1266,14 @@ class EnzymeConstrainedModel(ModelBuilder):
 
 
     def _is_inchikey_cofactor(self, inchikey):
+        if not self.cofactors_inchikey_layers3 or not self.cofactors_inchikey_layers2:
+            for mnxm in self.mnxm_cofactors:
+                try:
+                    inchikey = self.mnxm_inchikey[mnxm]
+                    self.cofactors_inchikey_layers3.append(inchikey)
+                    self.cofactors_inchikey_layers2.append('-'.join(inchikey.split('-')[:-1]))
+                except KeyError:
+                    pass
         if inchikey in self.cofactors_inchikey_layers3:
             return True
         if inchikey_layer_extract(inchikey, 2) in self.cofactors_inchikey_layers2:

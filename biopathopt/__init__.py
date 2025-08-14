@@ -6,14 +6,15 @@ from .dlkcat import KcatPredictor, KcatPrediction
 
 from . import utils as utils
 from . import plots as plots
+from. fvseof import FVSEOF
 
 import logging
 
 logging.basicConfig(
     #level=logging.DEBUG,
     #level=logging.INFO,
-    level=logging.WARNING,
-    #level=logging.ERROR,
+    #level=logging.WARNING,
+    level=logging.ERROR,
     format='%(asctime)s.%(msecs)03d %(levelname)s %(module)s - %(funcName)s: %(message)s',
     datefmt='%d-%m-%Y %H:%M:%S',
 )
@@ -25,6 +26,7 @@ __all__ = [
     'EnzymeConstrainedModel',
     'KcatPredictor',
     'KcatPrediction',
+    'FVSEOF',
     'utils',
     'plots',
 ]

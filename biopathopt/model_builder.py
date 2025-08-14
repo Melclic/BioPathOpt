@@ -164,7 +164,7 @@ class ModelBuilder(Data):
         if input_model:
             to_save_model = input_model
         else:
-            to_save_model = self.ec_model
+            to_save_model = self.model
         if file_path.endswith('json.gz') or file_path.endswith('json.gzip'):
             json_str = cobra.io.to_json(to_save_model)  # serialize model to JSON string
             with gzip.open(file_path, 'wt', encoding='utf-8') as f:
