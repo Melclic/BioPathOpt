@@ -1,6 +1,6 @@
 # BioPathOpt
 
-BioPathOpt is a Python package designed to streamline metabolic engineering workflows by integrating advanced modeling and optimization tools into a unified framework. It enables researchers to enrich stoichiometric metabolic models with additional biochemical data, seamlessly incorporate enzyme-constrained modeling approaches, and perform targeted optimization for the production of desired molecules. We provide a central location to 
+BioPathOpt is a Python package designed to streamline metabolic engineering workflows by integrating advanced modeling and optimization tools into a unified framework. It enables researchers to enrich stoichiometric metabolic models with additional biochemical data, seamlessly incorporate enzyme-constrained modeling approaches, and perform targeted optimization for the production of desired molecules.
 
 ## Enzyme Constrained Modelling
 
