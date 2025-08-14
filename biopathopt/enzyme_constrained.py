@@ -83,7 +83,7 @@ class EnzymeConstrainedModel(ModelBuilder):
                 if gene_uniprot_annotation_name!='uniprot':
                     g.annotation['uniprot'] = g.annotation.get(gene_uniprot_annotation_name)
         gene_coverage = count_uniprot_id / len(self.model.genes)
-        assert gene_coverage > 0.33, f"The coverage of genes is too low ({gene_coverage*100:.1f}%), it's not recommended to construct an enzyme-constrained model. Please add 'uniprot' annotations to genes manually"
+        assert gene_coverage > 0.33, f"The coverage of genes is too low ({gene_coverage*100:.1f}%), it's not recommended to construct an enzyme-constrained model. Please add 'uniprot' annotations to genes manually or if you have annotations and they are called something else, please specify in the constructor using parameter 'gene_uniprot_annotation_name'"
 
 
     def return_ec_model(
