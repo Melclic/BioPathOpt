@@ -13,6 +13,7 @@ import re
 import gzip
 import copy
 import pickle
+import sys
 
 import compress_json
 import networkx as nx
@@ -20,10 +21,13 @@ import numpy as np
 import pandas as pd
 import requests
 import pubchempy as pcp
+from urllib.error import URLError
+from http.client import RemoteDisconnected
+
 
 from typing import Tuple, Dict, List, Union, Optional, Any
 
-from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract
+from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract, stream_json
 
 """Collection of functions that fetch data from MetaNetX
 
@@ -41,7 +45,13 @@ class Data:
     data for reactions and metabolites etc...
     """
 
-    def __init__(self):
+    def __init__(
+            self, 
+            low_memory_mode: bool = False, 
+            use_progressbar: bool = True
+        ):
+        self.use_progressbar = use_progressbar
+        self.low_memory_mode = low_memory_mode
         self.base_dir = os.path.dirname(os.path.realpath(__file__))
         self._chem_xref = None
         self._reac_xref = None
@@ -58,9 +68,9 @@ class Data:
         self._keggm_mnxm = None
         self._chebim_mnxm = None
         self._molname_mnxm = None
-        self._json_brenda = None
-        self._brenda_ec_inchikey_kcat = None
-        self._brenda_ec_inchikey_sa = None
+        self._brenda_ec_inchikey_kcat = {}
+        self._brenda_ec_inchikey_sa = {}
+        self._brenda_ec_g = None
         #  these are the user overwrites
         self.inchikey_overwrite = {
             "GPRLSGONYQIRFK-FTGQXOHASA-N": "GPRLSGONYQIRFK-UHFFFAOYSA-N",
@@ -80,7 +90,8 @@ class Data:
         self.pubchem_sec_start = 0.0
         self.pubchem_sec_count = 0
         #self.ncbi = None
-
+        self.fuzzy_search_cache = {}
+        self.brenda_rest_retries = 50
         """
         Includes the following plus others defined in the ECMpy package
                 # get all the hardcoded cofactors that exist
@@ -91,6 +102,26 @@ class Data:
         self.mnxm_cofactors = ['MNXM1102419', 'MNXM3', 'MNXM1105762', 'MNXM731165', 'MNXM13', 'MNXM1103285', 'MNXM796', 'MNXM729302', 'MNXM90960', 'MNXM734750', 'MNXM1102191', 'MNXM257', 'MNXM02', 'MNXM1', 'MNXM728294', 'MNXM728062', 'MNXM51918', 'MNXM738702', 'MNXM1107902', 'MNXM360', 'MNXM1104559', 'MNXM739756', 'MNXM1107906', 'MNXM1105927', 'MNXM740692', 'MNXM10', 'MNXM230', 'MNXM232', 'MNXM732398', 'MNXM735437', 'MNXM95', 'MNXM8975', 'MNXM11', 'MNXM255', 'MNXM436', 'MNXM9', 'MNXM731949', 'MNXM178', 'MNXM1102152', 'MNXM124865', 'MNXM2229', 'MNXM128', 'MNXM1101474', 'MNXM2255', 'MNXM39', 'MNXM3654', 'MNXM726339', 'MNXM1108018', 'MNXM1103428', 'MNXM1102167', 'MNXM8978', 'MNXM35', 'MNXM729214', 'MNXM36', 'MNXM729215', 'MNXM924', 'MNXM286', 'MNXM162231', 'MNXM4133', 'MNXM490899', 'MNXM572', 'MNXM1104555', 'MNXM58', 'MNXM731166', 'MNXM741485', 'MNXM1231', 'MNXM732620', 'MNXM1103718', 'MNXM332', 'MNXM40333', 'MNXM727276', 'MNXM1104823', 'MNXM1101285', 'MNXM1103302', 'MNXM726712', 'MNXM730586', 'MNXM266', 'MNXM8', 'MNXM53428', 'MNXM137', 'MNXM5', 'MNXM653', 'MNXM537', 'MNXM452', 'MNXM740736', 'MNXM152', 'MNXM191', 'MNXM1104385', 'MNXM727888', 'MNXM2174', 'MNXM432', 'MNXM411', 'MNXM726711', 'MNXM107', 'MNXM726710', 'MNXM652', 'MNXM736415', 'MNXM1101868', 'MNXM169', 'MNXM27', 'MNXM735438', 'MNXM394', 'MNXM738430', 'MNXM1922', 'MNXM40414', 'MNXM4835', 'MNXM1102128', 'MNXM736654', 'MNXM1105936', 'MNXM1562', 'MNXM234', 'WATER', 'MNXM1107622', 'MNXM735978', 'MNXM4041', 'MNXM1102072', 'MNXM1103458', 'MNXM735047', 'MNXM727224', 'MNXM733186', 'MNXM1103553', 'MNXM344', 'MNXM1092965']
 
     # ############ 
+
+    def flush_parameters(self):
+        self._chem_xref = None
+        self._reac_xref = None
+        self._chem_prop = None
+        self._reac_prop = None
+        self._biggm_mnxm = None
+        self._biggr_mnxr = None
+        self._inchikey_mnxm = None
+        self._mnxm_inchikey = None
+        self._inchikey2_mnxm = None
+        self._g_depr_mnxm = None
+        self._g_depr_mnxr = None
+        self._keggr_mnxr = None
+        self._keggm_mnxm = None
+        self._chebim_mnxm = None
+        self._molname_mnxm = None
+        self._brenda_ec_inchikey_kcat = {}
+        self._brenda_ec_inchikey_sa = {}
+        self._brenda_ec_g = None
 
     def construct_reaction_string(
             self,
@@ -354,21 +385,47 @@ class Data:
 
     # ############# BRENDA ######################
     # Here we parse the brenda file and return the substrate kcat values
-    
-    @property
-    def json_brenda(self):
-        if not self._json_brenda:
-            logging.debug("------ json_brenda -----")
-            logging.debug("\t-> Populating...")
-            path_file = os.path.join(
-                self.base_dir, "flatfiles/json_brenda.json.gz"
-            )
-            if not os.path.exists(path_file):
-                raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php')
-            with gzip.open(path_file, 'rt', encoding='utf-8') as f:
-                self._json_brenda = json.load(f)
-        return self._json_brenda
 
+    @property
+    def brenda_ec_g(self):
+        if not self._brenda_ec_g:
+            logging.debug('-------- brenda_ec_g ---------')
+            logging.debug('Populating.....')
+            path_file = os.path.join(
+                self.base_dir, "flatfiles/brenda_ec_g.pkl"
+            )
+            if os.path.exists(path_file):
+                with open(path_file, 'rb') as f:
+                    self._brenda_ec_g = pickle.load(f)
+            else:
+                ### generate it ####
+                def extract_history_ec(text):
+                    match = re.search(r'EC\s+(\d+\.\d+\.\d+\.\d+)', text)
+                    if match:
+                        ec_number = match.group(1)
+                        return ec_number
+                    return None
+                G = nx.DiGraph()
+                # check that the brenda file is there
+                brenda_path_file = os.path.join(
+                    self.base_dir, "flatfiles/brenda.json.tar.gz"
+                )
+                if not os.path.exists(brenda_path_file):
+                    raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
+                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+                    G.add_node(ec_number)    
+                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+                    if 'history' in ec_entry:
+                        to_ec = extract_history_ec(
+                            ec_entry['history']
+                        )
+                        if to_ec:
+                            G.add_edge(to_ec, ec_number)
+
+                with open(path_file, 'wb') as f:
+                    pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
+                self._brenda_ec_g = G
+        return self._brenda_ec_g
 
     @property
     def brenda_ec_inchikey_kcat(self):
@@ -383,7 +440,18 @@ class Data:
                 with open(path_file, 'rb') as f:
                     self._brenda_ec_inchikey_kcat = pickle.load(f)
             else:
-                self._brenda_ec_inchikey_kcat = self._generate_brenda_kinetics(parse_type='kcat')
+                for attempt in range(1, self.brenda_rest_retries + 1):
+                    try:
+                        self._generate_brenda_kinetics(
+                                parse_type='kcat', 
+                                use_progressbar=self.use_progressbar, 
+                            )
+                        break  # success, exit loop
+                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
+                        logging.warning(f'The following eror: {e}... retrying')
+                        if attempt >= self.brenda_rest_retries:
+                            raise e # give up after last attempt
+                        time.sleep(5.0)
                 with open(path_file, 'wb') as f:
                     pickle.dump(self._brenda_ec_inchikey_kcat, f, pickle.HIGHEST_PROTOCOL)
         return self._brenda_ec_inchikey_kcat
@@ -402,17 +470,29 @@ class Data:
                 with open(path_file, 'rb') as f:
                     self._brenda_ec_inchikey_sa = pickle.load(f)
             else:
-                self._brenda_ec_inchikey_sa = self._generate_brenda_kinetics(parse_type='sa')
+                for attempt in range(1, self.brenda_rest_retries + 1):
+                    try:
+                        self._generate_brenda_kinetics(
+                                parse_type='sa', 
+                                use_progressbar=self.use_progressbar, 
+                            )
+                        break  # success, exit loop
+                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
+                        logging.warning(f'The following eror: {e}... retrying')
+                        if attempt >= self.brenda_rest_retries:
+                            raise e# give up after last attempt
+                        time.sleep(5.0)
                 with open(path_file, 'wb') as f:
                     pickle.dump(self._brenda_ec_inchikey_sa, f, pickle.HIGHEST_PROTOCOL)
         return self._brenda_ec_inchikey_sa
 
 
-    def _get_protein_reactants_inchikey(self, ec_number, protein_ids=[]):
+    def _get_protein_reactants_inchikey(self, ec_entry, protein_ids=[]):
         #because the comments do not always have the right substrates, get the original reaction from the protein
 
         def extract_reactants_inchikey(reactions_list, cofactor_list=[], filter_proteins_ids=[]):
             reactant_dict = {}
+            logging.debug(f'extract_reactants_inchikey: {len(reactions_list)}')
             for reac in reactions_list:
                 reactants = [y.strip() for y in reac.get('value').split('=')[0].split('+')]
                 for cof in cofactor_list:
@@ -437,33 +517,34 @@ class Data:
 
         reactions_list = []
         if not reactions_list:
-            if 'substrates_products' in self.json_brenda['data'][ec_number]:
+            if 'substrates_products' in ec_entry:
                 if protein_ids:
                     try:
-                        reactions_list = [y for y in self.json_brenda['data'][ec_number]['substrates_products'] if set(protein_ids) & set(y['proteins'])]
+                        reactions_list = [y for y in ec_entry['substrates_products'] if set(protein_ids) & set(y['proteins'])]
                     except KeyError:
-                        reactions_list = self.json_brenda['data'][ec_number]['substrates_products']
+                        reactions_list = ec_entry['substrates_products']
                 else:
-                    reactions_list = self.json_brenda['data'][ec_number]['substrates_products']
+                    reactions_list = ec_entry['substrates_products']
         if not reactions_list:
-            if 'reaction' in self.json_brenda['data'][ec_number]:
+            if 'reaction' in ec_entry:
                 if protein_ids:
                     try:
-                        reactions_list = [y for y in self.json_brenda['data'][ec_number]['reaction'] if set(protein_ids) & set(y['proteins'])]
+                        reactions_list = [y for y in ec_entry['reaction'] if set(protein_ids) & set(y['proteins'])]
                     except KeyError:
-                        reactions_list = self.json_brenda['data'][ec_number]['reaction']
+                        reactions_list = ec_entry['reaction']
                 else:
-                    reactions_list = self.json_brenda['data'][ec_number]['reaction']
-        if 'cofactor' in self.json_brenda['data'][ec_number]:
+                    reactions_list = ec_entry['reaction']
+        if 'cofactor' in ec_entry:
             if protein_ids:
                 try:
-                    cofactor_list = [y for y in self.json_brenda['data'][ec_number]['cofactor'] if set(protein_ids) & set(y['proteins'])]
+                    cofactor_list = [y for y in ec_entry['cofactor'] if set(protein_ids) & set(y['proteins'])]
                 except KeyError:
-                    cofactor_list = self.json_brenda['data'][ec_number]['cofactor']
+                    cofactor_list = ec_entry['cofactor']
             else:
-                cofactor_list = self.json_brenda['data'][ec_number]['cofactor']
+                cofactor_list = ec_entry['cofactor']
         else:
             cofactor_list = []
+        logging.debug('extract_reactants_inchikey')
         reactant_dict = extract_reactants_inchikey(
             reactions_list=reactions_list, 
             cofactor_list=cofactor_list,
@@ -505,37 +586,71 @@ class Data:
             return value, substrate
         return None, None
 
-    def _generate_brenda_kinetics(self, parse_type='kcat'):
+    def _generate_brenda_kinetics(
+            self, 
+            parse_type='kcat', 
+            use_progressbar: bool = False, 
+        ):
+        # check that the brenda file is there
+        brenda_path_file = os.path.join(
+            self.base_dir, "flatfiles/brenda.json.tar.gz"
+        )
+        if not os.path.exists(brenda_path_file):
+            raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
         if parse_type not in ['kcat', 'sa']:
             raise TypeError(f'Input Must be kcat or sa: {parse_type}')
-        res = {}
-        for ec_number in tqdm(self.json_brenda['data'], desc=f"Generate Brenda {parse_type} File"):
+        pbar = None
+        last_read_bytes = 0
+        if use_progressbar:
+            total_bytes = os.path.getsize(brenda_path_file)
+            pbar = tqdm(total=total_bytes, unit="B", unit_scale=True, desc=f"Generate Brenda {parse_type} File")
+        for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+            logging.debug(f'------------ {ec_number} ---------')
+            res = {}
+            if use_progressbar:
+                pbar.set_description(f"Generate Brenda {parse_type} File: {ec_number}")
+                delta = bytes_read - last_read_bytes
+                if delta > 0:
+                    pbar.update(delta)
+                    last_read_bytes = bytes_read
+            if parse_type=='kcat':
+                if ec_number in self._brenda_ec_inchikey_kcat:
+                    logging.debug(f'Skipping {ec_number}')
+                    continue
+            elif parse_type=='sa':
+                if ec_number in self._brenda_ec_inchikey_sa:
+                    logging.debug(f'Skipping {ec_number}')
+                    continue
+            logging.debug('deep copy')
             if parse_type=='sa':
                 try:
-                    kinetics_list = copy.deepcopy(self.json_brenda['data'][ec_number]['specific_activity'])
+                    kinetics_list = copy.deepcopy(ec_entry['specific_activity'])
                 except KeyError:
                     continue
                 try:
-                    protein_dict = copy.deepcopy(self.json_brenda['data'][ec_number]['protein'])
+                    protein_dict = ec_entry['protein']
                 except KeyError:
                     continue
             elif parse_type=='kcat':
                 try:
-                    kinetics_list = copy.deepcopy(self.json_brenda['data'][ec_number]['kcat_km_value'])
+                    kinetics_list = copy.deepcopy(ec_entry['kcat_km_value'])
                 except KeyError:
                     continue
                 try:
-                    protein_dict = copy.deepcopy(self.json_brenda['data'][ec_number]['protein'])
+                    protein_dict = ec_entry['protein']
                 except KeyError:
                     continue
             ### get the reactants from the reaction description
+            logging.debug('_get_protein_reactants_inchikey')
             try:
                 default_reactants = self._get_protein_reactants_inchikey(
-                    ec_number=ec_number 
+                    ec_entry=ec_entry
                 )
             except KeyError:
                 default_reactants = {}
-            res[ec_number] = {}
+            #res[ec_number] = {}
+            logging.debug('looping through the kinetics list')
+            logging.debug(len(kinetics_list))
             for kinetic_entry in kinetics_list:
                 kinetic_entry['proteins'] = [protein_dict[y] for y in kinetic_entry.get('proteins')]
                 if 'mutant' in kinetic_entry.get('comment').lower() or 'mutated' in kinetic_entry.get('comment').lower():
@@ -546,16 +661,18 @@ class Data:
                 #extract from the comment
                 if parse_type=='sa':
                     extracted_sub = self._extract_brenda_substrates_sa(kinetic_entry.get('comment').lower())
-                    value = kinetic_entry.get('value')
-                    if value and value>0.0:
-                        value = float(value)
-                    else:
+                    try:
+                        value = float(kinetic_entry.get('value'))
+                        if value<=0.0:
+                            continue
+                    except ValueError:
                         continue
                 elif parse_type=='kcat':
                     value, extracted_sub = self._extract_brenda_substrates_kcat(kinetic_entry.get('value').lower())
                     if not value and value>0.0:
                         continue
                 if extracted_sub:
+                    logging.debug('molecule_name_search_inchikey')
                     search_inchikey = self.molecule_name_search_inchikey(extracted_sub.lower())
                     if search_inchikey:
                         sub_id = [search_inchikey]
@@ -589,16 +706,20 @@ class Data:
                 except (TypeError, KeyError) as e:
                     to_add_uniprot = []
                 sub_id = tuple(sub_id)
-                if not sub_id in res[ec_number]:
-                    res[ec_number][sub_id] = {}
+                if not sub_id in res:
+                    res[sub_id] = {}
                 for org in to_add_org:
-                    if org not in res[ec_number][sub_id]:
-                        res[ec_number][sub_id][org] = {'uniprot': [], 'values': [], 'comments': []}
-                    res[ec_number][sub_id][org]['values'].append(value)
-                    res[ec_number][sub_id][org]['uniprot'] += to_add_uniprot
-                    res[ec_number][sub_id][org]['comments'].append(kinetic_entry.get('comment').lower())
-        return res
-
+                    if org not in res[sub_id]:
+                        res[sub_id][org] = {'uniprot': [], 'values': [], 'comments': []}
+                    res[sub_id][org]['values'].append(value)
+                    res[sub_id][org]['uniprot'] += to_add_uniprot
+                    res[sub_id][org]['comments'].append(kinetic_entry.get('comment').lower())
+            if parse_type=='kcat':
+                self._brenda_ec_inchikey_kcat[ec_number] = res
+            elif parse_type=='sa':
+                self._brenda_ec_inchikey_sa[ec_number] = res
+        if last_read_bytes < total_bytes:
+            pbar.update(total_bytes - last_read_bytes)
 
     ##### taxonomy ###
 
@@ -1207,6 +1328,18 @@ class Data:
         Raises:
             KeyError: If multiple compounds are returned for the query.
         """
+        cid_keys = [
+            "canonical_smiles",
+            "charge",
+            "cid",
+            "elements",
+            "exact_mass",
+            "inchi",
+            "isomeric_smiles",
+            "iupac_name",
+            "molecular_formula",
+            "molecular_weight",
+        ]
         logging.debug(f'Query: {query} - itype: {itype}')
         
         if not query:
@@ -1214,12 +1347,15 @@ class Data:
 
         # Check if result is already cached
         try:
+            if query.lower() in self.pubchem_search_cache:
+                logging.debug(f'Query is in pubchem cache: {self.pubchem_search_cache[query.lower()]}')
             return self.pubchem_search_cache[query.lower()]
         except KeyError:
             pass
 
         try:
             # Perform the PubChem search
+            logging.debug(f'Searching for {query}')
             cids = pcp.get_compounds(identifier=query, namespace=itype)
         except ValueError:
             # Cache the empty result and return
@@ -1227,13 +1363,17 @@ class Data:
             return {}
 
         if len(cids) == 0:
+            logging.debug('There are not results')
             return {}
         elif len(cids) == 1:
+            logging.debug('There is one single result')
             # Cache and return the single result
             cid = cids[0].to_dict()
+            cid = {i: cid.get(i) for i in cid_keys}
             self.pubchem_search_cache[query.lower()] = cid
             return cid
         else:
+            logging.debug('There are multiple results')
             # Cache the empty result and raise an error for ambiguity
             self.pubchem_search_cache[query.lower()] = {}
             raise KeyError(f'Multiple cids {cids} for {query}')
@@ -1251,37 +1391,57 @@ class Data:
         Returns:
             Optional[str]: The InChIKey of the molecule if found, otherwise None.
         """
+        #try:
+        # Attempt lookup in cached PubChem search results
+        logging.debug(f'--------- Searching for {name} -----------------')
+        if not name:
+            logging.debug('The query is empty')
+            return None
+        fixed_name_mnxm = {
+                'nad': 'MNXM8', 
+                'nadh': 'MNXM10', 
+                'h': 'MNXM1', 
+                'h+': 'MNXM1', 
+                'h2o': 'WATER',
+                'atp': 'MNXM3',
+            }
+        if name.lower() in fixed_name_mnxm:
+            logging.debug('name is in fixed list')
+            return self.mnxm_inchikey[fixed_name_mnxm[name.lower()]]
         try:
-            # Attempt lookup in cached PubChem search results
+            cid = self.pubchem_search_cache[name.lower()]
+            inchikey = cid.get('inchikey')
+            if inchikey:
+                return inchikey
+        except KeyError:
+            pass
+        # Fuzzy match against internal MNX mapping
+        if name.lower() in self.fuzzy_search_cache:
+            logging.debug('query is in fuzzy_search_cache: {fuzzy_mnxm}')
+            fuzzy_mnxm = self.fuzzy_search_cache[name.lower()]
             try:
-                cid = self.pubchem_search_cache[name.lower()]
-                inchikey = cid.get('inchikey')
-                if inchikey:
-                    return inchikey
+                return self.mnxm_inchikey[fuzzy_mnxm]
             except KeyError:
                 pass
-            k
-
-
-            # Fuzzy match against internal MNX mapping
+        else:
             fuzzy_mnxm = fuzzy_dict_lookup(name.lower(), self.molname_mnxm)
-            if fuzzy_mnxm:
-                try:
-                    return self.mnxm_inchikey[fuzzy_mnxm]
-                except KeyError:
-                    pass
-
-            # Fallback to exact PubChem search by name
+            self.fuzzy_search_cache[name.lower()] = fuzzy_mnxm
             try:
-                cid = self.exact_pubchem_search(name.lower(), 'name')
-                inchikey = cid.get('inchikey')
-                if inchikey:
-                    return inchikey
-            except (KeyError, AttributeError):
+                return self.mnxm_inchikey[fuzzy_mnxm]
+            except KeyError:
                 pass
 
-        except Exception:
+        # Fallback to exact PubChem search by name
+        try:
+            cid = self.exact_pubchem_search(name.lower(), 'name')
+            inchikey = cid.get('inchikey')
+            if inchikey:
+                return inchikey
+        except (KeyError, AttributeError):
             pass
+
+        #except Exception:
+        #    pass
 
         return None
 
@@ -1445,11 +1605,17 @@ class Data:
                 cp["xref"]["mnxr"].append(mnxr)
         return cp, _mnxr
 
-    #  refresh the cache #
+    ################  refresh the cache ###############3
 
-    def refresh_cache(self, delete_old_files=False):
+    def refresh_cache(
+            self, 
+            delete_old_files=False, 
+            use_progressbar=True,
+            parse_brenda_files=True,
+            ):
         """Refresh all the cache files"""
         logging.info("Refreshing the cache. This may take a while...")
+        self.use_progressbar = use_progressbar
         if delete_old_files:
             cache_dir = os.path.join(self.base_dir, "flatfiles")
             for f in os.listdir(cache_dir):
@@ -1457,17 +1623,76 @@ class Data:
                     "Deleting the following file: " + str(os.path.join(cache_dir, f))
                 )
                 os.remove(os.path.join(cache_dir, f))
+        pbar = None
+        if use_progressbar:
+            if parse_brenda_files:
+                pbar = tqdm(total=13)
+            else:
+                pbar = tqdm(total=14)
+            pbar.set_description(f"Processing g_depr_mnxm")
         _ = self.g_depr_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing g_depr_mnxr")
         _ = self.g_depr_mnxr
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing chem_xref")
         _ = self.chem_xref
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing reac_xref")
         _ = self.reac_xref
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing chem_prop")
         _ = self.chem_prop
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing reac_prop")
         _ = self.reac_prop
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing biggm_mnxm")
         _ = self.biggm_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing biggr_xref")
         _ = self.biggr_mnxr
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing mnxm_inchikey")
         _ = self.mnxm_inchikey
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing inchikey_mnxm")
         _ = self.inchikey_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing inchikey2_mnxm")
         _ = self.inchikey2_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing keggm_mnxm")
         _ = self.keggm_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing chebim_mnxm")
         _ = self.chebim_mnxm
-        _ = self.name_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing molname_mnxm")
+        _ = self.molname_mnxm
+        if parse_brenda_files:
+            if use_progressbar:
+                pbar.update(1)
+                pbar.set_description(f"Processing brenda_ec_g")
+            _ = self.brenda_ec_g
+            if use_progressbar:
+                pbar.close()
+            _ = self.brenda_ec_inchikey_sa
+            _ = self.brenda_ec_inchikey_kcat
+        else:
+            if use_progressbar:
+                pbar.close()
+

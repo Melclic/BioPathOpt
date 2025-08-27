@@ -18,6 +18,23 @@ from sklearn.metrics import mean_squared_error,r2_score
 from biopathopt.utils import load_pickle
 from biopathopt import Data
 
+import warnings
+
+# Redirect warnings to logging
+logging.captureWarnings(True)
+
+# The "py.warnings" logger will receive them
+logger = logging.getLogger("py.warnings")
+
+"""
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=SyntaxWarning,
+    message=".*Malformed gene_reaction_rule.*"
+)
+"""
+
 class KcatPredictor(Data):
     def __init__(
         self,
@@ -200,50 +217,52 @@ class KcatPredictor(Data):
         if not sequence:
             logging.warning(f'Sequence is empty: {sequence}, cannot predict kcat')
             return None
-        if not smiles or not inchi:
+        if not smiles and not inchi:
             logging.warning(f'Need at least one smiles or inchi, cannot predict kcat')
             return None
-        try:
-            mol = Chem.AddHs(Chem.inchi.MolFromInchi(inchi))
-        except TypeError:
-            logging.warning('Cannot use inchi, switch to smiles')
+        mol = None
+        if inchi:
+            try:
+                mol = Chem.AddHs(Chem.inchi.MolFromInchi(inchi))
+            except TypeError:
+                logging.warning('Cannot use inchi, switch to smiles')
+        elif smiles:
             try:
                 mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
             except TypeError:
                 logging.error('Cannot use the passed structures')
+        if mol:
+            try:
+                atoms = self.create_atoms(mol, self.atom_dict)
+            except KeyError:
+                logging.warning(f'Cannot create atoms: {self.atom_dict}')
                 return None
-
-        try:
-            atoms = self.create_atoms(mol, self.atom_dict)
-        except KeyError:
-            logging.warning(f'Cannot create atoms: {self.atom_dict}')
-            return None
-        i_jbond_dict = self.create_ijbonddict(mol, self.bond_dict)
-        try:
-            fingerprints = self.extract_fingerprints(
-                atoms, i_jbond_dict, self.radius, self.fingerprint_dict, self.edge_dict
-            )
-        except IndexError as e:
-            logging.warning('Cannot make fingerprint for {smiles}, {inchi}, {sequence}')
-            return None
-        adjacency = self.create_adjacency(mol)
-        words = self.split_sequence(sequence, self.ngram, self.word_dict)
-        inputs = [
-            torch.LongTensor(fingerprints),
-            torch.FloatTensor(adjacency),
-            torch.LongTensor(words)
-        ]
-        try:
-            prediction = self.kcat_gnn_model.forward(inputs)
-        except RuntimeError:
-            logging.warning('Cannot get forward prediction for {inputs}')
-            return None
-        kcat_log_value = prediction.item()
-        kcat_sec_value = float('%.4f' % math.pow(2, kcat_log_value))
-        #keep only the largest (i.e. slowest) reaction subunit
-        #if kcat_sec_value>kcat:
-        #    kcat = kcat_sec_value
-        return kcat_sec_value
+            i_jbond_dict = self.create_ijbonddict(mol, self.bond_dict)
+            try:
+                fingerprints = self.extract_fingerprints(
+                    atoms, i_jbond_dict, self.radius, self.fingerprint_dict, self.edge_dict
+                )
+            except IndexError as e:
+                logging.warning(f'Cannot make fingerprint for {smiles}, {inchi}, {sequence}')
+                return None
+            adjacency = self.create_adjacency(mol)
+            words = self.split_sequence(sequence, self.ngram, self.word_dict)
+            inputs = [
+                torch.LongTensor(fingerprints),
+                torch.FloatTensor(adjacency),
+                torch.LongTensor(words)
+            ]
+            try:
+                prediction = self.kcat_gnn_model.forward(inputs)
+            except RuntimeError:
+                logging.warning('Cannot get forward prediction for {inputs}')
+                return None
+            kcat_log_value = prediction.item()
+            kcat_sec_value = float('%.4f' % math.pow(2, kcat_log_value))
+            #keep only the largest (i.e. slowest) reaction subunit
+            #if kcat_sec_value>kcat:
+            #    kcat = kcat_sec_value
+            return kcat_sec_value
 
     '''
     def model_predict_kcat(self, model: Any) -> None:

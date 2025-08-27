@@ -2,9 +2,12 @@ name: biopathopt
 channels:
   - defaults
   - conda-forge
+  - anaconda
   - bioconda
 dependencies:
+  - python=3.10
   - numpy
+  - plotly
   - pandas
   - invoke
   - compress_json
@@ -21,6 +24,10 @@ dependencies:
   - pytorch
   - rdkit
   - scikit-learn
+  - jupyterlab
+  - tqdm
+  - xmltodict
   - pip:
     - cobra
     - python-libsbml
+    - ijson

@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, List, Union, Optional, Any
+from typing import Tuple, Dict, List, Union, Optional, Any, Generator
 import pandas as pd
 import re
 import pickle
@@ -6,6 +6,72 @@ import gzip
 import json
 import copy
 from rapidfuzz import process, fuzz
+import os
+import ijson
+import logging
+import tarfile
+
+'''
+def stream_json(path: str, pointer: str = "item") -> Generator[Tuple[str, Any, int], None, None]:
+    """Stream a gzipped JSON file and yield (key, value, bytes_read).
+
+    Args:
+        path (str): Path to the .json.gz file.
+        pointer (str): JSON pointer to the object you want (default: "data").
+
+    Yields:
+        Tuple[str, Any, int]: key, value, and compressed bytes read.
+    """
+    with gzip.open(path, "rb") as f:
+        fileobj = f.fileobj
+        for key, value in ijson.kvitems(f, pointer):
+            yield key, value, fileobj.tell()
+'''
+
+def stream_json(path: str, pointer: str = "item") -> Generator[Tuple[str, Any, int], None, None]:
+    """Stream a JSON file (supports .json, .json.gz, and .json.tar.gz) and yield (key, value, bytes_read).
+
+    Args:
+        path (str): Path to the JSON file (.json, .json.gz, or .json.tar.gz).
+        pointer (str): JSON pointer to the object you want (default: "item").
+
+    Yields:
+        Tuple[str, Any, int]: key, value, and compressed bytes read (None if not available).
+    """
+    lower = path.lower()
+
+    # Helper: yield kvitems with optional .tell()
+    def _iter(fobj):
+        has_tell = hasattr(fobj, "tell")
+        for key, value in ijson.kvitems(fobj, pointer):
+            yield key, value, fobj.tell() if has_tell else None
+
+    # Case 1: .tar.gz
+    if lower.endswith(".tar.gz"):
+        with tarfile.open(path, mode="r:gz") as tf:
+            # Pick first member ending in .json
+            member = next((m for m in tf.getmembers() if m.name.lower().endswith(".json")), None)
+            if member is None:
+                raise FileNotFoundError("No .json file found inside tar archive")
+            fobj = tf.extractfile(member)
+            if fobj is None:
+                raise IOError(f"Failed to open member '{member.name}' from archive")
+            with fobj:
+                for tup in _iter(fobj):
+                    yield tup
+        return
+
+    # Case 2: .gz
+    if lower.endswith(".gz"):
+        with gzip.open(path, "rb") as f:
+            for tup in _iter(f):
+                yield tup
+        return
+
+    # Case 3: plain .json
+    with open(path, "rb") as f:
+        for tup in _iter(f):
+            yield tup
 
 
 def merge_annot_dicts(input_parent_dict: dict, child_dict: dict) -> dict:
@@ -90,8 +156,11 @@ def fuzzy_dict_lookup(query: str, data: dict, threshold: float = 90.0):
     Returns:
         The value of the best matching key, or None if no match meets the threshold.
     """
+    logging.debug(f'query: {query}')
+    logging.debug(f'threshold: {threshold}')
     match = process.extractOne(query, data.keys(), scorer=fuzz.ratio)
     if match and match[1] >= threshold:
+        logging.debug(f'Found match: {match[0]}')
         return data[match[0]]
     return None
 

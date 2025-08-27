@@ -26,7 +26,7 @@ from typing import List, Union, Dict, Optional, Tuple, Any
 
 from biopathopt import ModelBuilder
 from biopathopt import dlkcat
-from biopathopt.utils import inchikey_layer_extract, annotation_contains_value
+from biopathopt.utils import inchikey_layer_extract, annotation_contains_value, stream_json
 
 """
 This is a collection of functions to build and enzyme constrained model
@@ -38,17 +38,18 @@ TODO: change such that all use taxonomy instead of species name
 NOTE: taken from the https://github.com/tibbdc/ECMpy project and modified
 """
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    category=SyntaxWarning,
-    message=".*Malformed gene_reaction_rule.*"
-)
-
 class EnzymeConstrainedModel(ModelBuilder):
     
-    def __init__(self, path_to_model: str, species_name=None, taxonomy_id=None, use_progressbar: bool = False, gene_uniprot_annotation_name: str = 'uniprot'):
-        super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar)
+    def __init__(
+            self, 
+            path_to_model: str, 
+            species_name=None, 
+            taxonomy_id=None, 
+            use_progressbar: bool = False, 
+            gene_uniprot_annotation_name: str = 'uniprot',
+            low_memory_mode: bool = False,
+        ):
+        super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar, low_memory_mode=low_memory_mode)
         #TODO: print the stats of uniprot, structure, etc... so that we can
         # give a warning if the coverage is too low
         self._check_gene_uniprot(gene_uniprot_annotation_name=gene_uniprot_annotation_name)
@@ -65,7 +66,6 @@ class EnzymeConstrainedModel(ModelBuilder):
             if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
                 self.model.annotation['taxonomy'] = self.taxonomy_id
         #TODO: Add the taxonomy id and species name in the model annotation
-        self.brenda_ec_G = None
         self.cofactors_inchikey_layers3 = []
         self.cofactors_inchikey_layers2 = []
         self.brenda_kcat_max = {}
@@ -96,7 +96,7 @@ class EnzymeConstrainedModel(ModelBuilder):
             lowerbound: int = None,
             upperbound: int = None,
             ):
-        ec_model = copy.deepcopy(self.model)
+        ec_model = self.model.copy()
         try:
             substrate_exchange_reaction = ec_model.reactions.get_by_id(substrate_exchange_reaction_id)
         except KeyError:
@@ -177,6 +177,8 @@ class EnzymeConstrainedModel(ModelBuilder):
             extracellular_compartment_id=extracellular_compartment_id,
             substrate_concentration=substrate_concentration,)
         """
+        if not use_progressbar:
+            use_progressbar = self.use_progressbar
         #### initialize
         #logging.info(f'The carbon reaction is: {carbon_reac.id}')
         if carbon_exchange_reaction not in self.model.reactions:
@@ -198,7 +200,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         if not self.brenda_kcat_max:
             self.brenda_kcat_max = json.load(open(
                 os.path.join(
-                        self.base_dir, "flatfiles/EC_kcat_max.json"
+                        self.base_dir, "flatfiles/non_generative_data/EC_kcat_max.json"
                     )
                 ))
         #### calculate default 
@@ -291,19 +293,25 @@ class EnzymeConstrainedModel(ModelBuilder):
             species_name = None,
             taxonomy_id = None,
             use_progressbar: bool = False):
+        if not use_progressbar:
+            use_progressbar = self.use_progressbar
         # set the subunit and split the model to only forward reactions
         self._get_subunit_data(use_progressbar=use_progressbar)
         self._get_uniprot_aaseq_mw(use_progressbar=use_progressbar)
-        self.calculate_dlkcat(use_progressbar=use_progressbar)
-        self.database_kcat(species_name=species_name, taxonomy_id=taxonomy_id, use_progressbar=use_progressbar)
+        self._calculate_dlkcat(use_progressbar=use_progressbar)
+        if self.low_memory_mode:
+            self.flush_parameters()
+        self._database_kcat(species_name=species_name, taxonomy_id=taxonomy_id, use_progressbar=use_progressbar)
         self._set_kcat()
+        if self.low_memory_mode:
+            self.flush_parameters()
 
 
 
     ##### DLKcat ######
 
 
-    def calculate_dlkcat(self, use_progressbar: bool = False):
+    def _calculate_dlkcat(self, use_progressbar: bool = False):
         dl_kcat = dlkcat.KcatPredictor()
         #kcat_pred.model_predict_kcat(self.model)
         reac_iterator = tqdm(self.model.reactions, desc='Deep learning estimation of kcat') if use_progressbar else self.model.reactions
@@ -352,7 +360,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         self._calculate_mw_kcat()
 
 
-    def database_kcat(
+    def _database_kcat(
             self, 
             species_name=None,
             taxonomy_id=None,
@@ -447,7 +455,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         all_cond_sol = {}
         all_fc_sol = {}
         for cond in exlist:
-            tmp_model = copy.deepcopy(ec_model)
+            tmp_model = ec_model.copy()
             self.change_carbon_source()
             tmp_model.reactions.get_by_id(biomass_reaction_id).bounds = (cond, cond)
             tmp_model.objective = obj_reaction_id
@@ -711,6 +719,8 @@ class EnzymeConstrainedModel(ModelBuilder):
         uniprot_gene_id = {}
         uniprot_ids = []
         for g in self.model.genes:
+            if 'number_of_subunits' in g.annotation:
+                continue
             u = g.annotation.get('uniprot', None)
             if u:
                 if isinstance(u, list):
@@ -846,6 +856,8 @@ class EnzymeConstrainedModel(ModelBuilder):
         uniprot_gene_id = {}
         uniprot_ids = []
         for g in self.model.genes:
+            if 'total_subunits_mw' in g.annotation and 'aaseq' in g.annotation and 'mw' in g.annotation:
+                continue
             u = g.annotation.get('uniprot', None)
             if u:
                 if isinstance(u, list):
@@ -1215,6 +1227,7 @@ class EnzymeConstrainedModel(ModelBuilder):
 
     ## parse brenda db
 
+    """
     def _json_brenda_to_G(self):
         def extract_history_ec(text):
             match = re.search(r'EC\s+(\d+\.\d+\.\d+\.\d+)', text)
@@ -1222,21 +1235,24 @@ class EnzymeConstrainedModel(ModelBuilder):
                 ec_number = match.group(1)
                 return ec_number
             return None
-        
-        G = nx.DiGraph()
-        
-        for i in self.json_brenda['data'].keys():
-            G.add_node(i)
-            
-        for i in self.json_brenda['data'].keys():
-            if 'history' in self.json_brenda['data'][i]:
+        G = nx.DiGraph() 
+        # check that the brenda file is there
+        brenda_path_file = os.path.join(
+            self.base_dir, "flatfiles/json_brenda.json.gz"
+        )
+        if not os.path.exists(brenda_path_file):
+            raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as json_brenda.json.gz in biopathopt/flatfiles')
+        for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+            G.add_node(ec_number)    
+        for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+            if 'history' in ec_entry:
                 to_ec = extract_history_ec(
-                    self.json_brenda['data'][i]['history']
+                    ec_entry['history']
                 )
                 if to_ec:
-                    G.add_edge(to_ec, i)
+                    G.add_edge(to_ec, ec_number)
         return G
-
+    """
 
     def _find_source_node(self, node) -> str:
         """
@@ -1251,12 +1267,10 @@ class EnzymeConstrainedModel(ModelBuilder):
         """
         current = node
         visited = set()
-        if not self.brenda_ec_G:
-            self.brenda_ec_G = self._json_brenda_to_G()
-        if node not in self.brenda_ec_G:
+        if node not in self.brenda_ec_g:
             raise KeyError(f'{node} is not in the graph')
         while True:
-            preds = list(self.brenda_ec_G.predecessors(current))
+            preds = list(self.brenda_ec_g.predecessors(current))
             if not preds:
                 return current
             if current in visited:
