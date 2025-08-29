@@ -21,6 +21,59 @@ We see that there are clear improvements:
 
 ![](notebooks/img/prediction_improvements.png)
 
+# Docker
+
+The easiest way to use this project is to use the docker functionality that will
+open a notebook that enables you to run all aspects of this project. Below are 
+three options:
+
+## Running with Docker Compose
+
+This project ships with a flexible `docker-compose.yml` that lets you run **BioPathOpt** in three different ways:
+
+1. **Use a prebuilt image from Docker Hub**  
+2. **Build locally from `images/Dockerfile.cache`**  
+3. **Build locally from `images/Dockerfile` with a custom `BRENDA_FILE` argument**  
+
+### 1. Run from Docker Hub (recommended)
+
+Pulls the image directly from Docker Hub:
+
+```bash
+docker compose --profile hub up --build
+```
+
+### 2. Build from `images/Dockerfile.cache`
+
+Uses the cached build recipe for faster local builds. This is because the repeated
+pubchem REST requests will make the image fail. We recommend that you use the
+following file to generate the cache before :
+
+```bash
+docker compose --profile cache up --build
+```
+
+### 3. Build from `images/Dockerfile` with `BRENDA_FILE`
+
+Allows you to specify which **Brenda flatfile** to include at build time. Note
+that this will more likely fail because of the repeated REST requests to pubchem
+and we recommend that you either generate the cache locally, or use the image on 
+dockerhub:
+
+```bash
+# Use default brenda_2024_1.json
+docker compose --profile full up --build
+
+# Or override with a custom file
+BRENDA_FILE=brenda_2025_1.json docker compose --profile full up --build
+```
+
+### Notes
+
+- The JupyterLab server will be available at **http://localhost:8085**.  
+- Notebooks in your local `./notebooks/` directory are mounted inside the container at `/home/notebooks/`.  
+- No authentication token or password is set by default (`--NotebookApp.token='' --NotebookApp.password=''`).  
+
 # Installing
 
 Run the following code to install by travelling to the github folder and running:

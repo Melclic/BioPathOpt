@@ -21,10 +21,10 @@ This is a collection of functions to build a model
 
 class ModelBuilder(Data):
 
-    def __init__(self, path_to_model=None, use_progressbar=False):
+    def __init__(self, path_to_model=None, use_progressbar=False, low_memory_mode=False):
         """Class that inherits Data used to build a cobra model
         """
-        super().__init__()
+        super().__init__(low_memory_mode=low_memory_mode, use_progressbar=use_progressbar)
         # Manually created mapping to convert annotation IDs from MetaNetX to BiGG or other standards
         self.model = None
         self.mnxm_bigg_annot_convert = {
@@ -149,6 +149,9 @@ class ModelBuilder(Data):
             #update the gene annotations
             #TODO
             self.model.annotation['biopathopt_enriched'] = True
+        if self.low_memory_mode:
+            self.flush_parameters()
+
 
 
     def save_model(self, file_path: str, input_model: cobra.Model = None) -> None:
