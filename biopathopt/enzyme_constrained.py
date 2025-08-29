@@ -1,3 +1,6 @@
+
+from __future__ import annotations
+
 import re
 import copy
 import time
@@ -23,6 +26,7 @@ from rapidfuzz.distance import Levenshtein
 import gzip
 
 from typing import List, Union, Dict, Optional, Tuple, Any
+from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
 
 from biopathopt import ModelBuilder
 from biopathopt import dlkcat
@@ -1034,6 +1038,208 @@ class EnzymeConstrainedModel(ModelBuilder):
 
     ####### Database kcat search ####o
 
+
+
+
+from __future__ import annotations
+
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import pandas as pd
+from tqdm import tqdm
+
+
+def _fetch_uniprots_from_genes(genes: Iterable[Any]) -> List[str]:
+    """Extract and normalize UniProt accessions from reaction genes.
+
+    Args:
+        genes: COBRApy Gene list
+
+    Returns:
+        A de-duplicated list of UniProt accessions (strings).
+    """
+    uniprots: List[str] = []
+    for g in genes:
+        u = getattr(g, "annotation", {}).get("uniprot", [])
+        if isinstance(u, list):
+            uniprots.extend(u)
+        elif isinstance(u, str):
+            uniprots.append(u)
+        else:
+            logging.warning(f"Cannot determine uniprot type: {u}")
+    # remove pandas NaNs and dedupe in place
+    return list(set([x for x in uniprots if x is not pd.isna(x)]))
+
+
+def _substrate_inchikey_tuple(
+    reactants: Iterable[Any],
+    mnxm_inchikey: Dict[str, str],
+) -> Tuple[str, ...]:
+    """Build a sorted tuple of non-cofactor InChIKeys for reaction reactants.
+
+    Args:
+        reactants: Iterable of COBRApy Metabolite-like objects with ``.annotation``.
+        is_cofactor_cb: Callable that returns True if an InChIKey is a cofactor.
+        mnxm_inchikey: Mapping MetaNetX metabolite IDs -> InChIKeys.
+
+    Returns:
+        Sorted tuple of InChIKeys for non-cofactor reactants.
+    """
+    keys: List[str] = []
+    for m in reactants:
+        ann = getattr(m, "annotation", {})
+        inchikey: Optional[str] = ann.get("inchikey")
+
+        if not inchikey:
+            mnxm = ann.get("metanetx.chemical")
+            if isinstance(mnxm, list):
+                for mid in mnxm:
+                    ik = self.mnxm_inchikey.get(mid)
+                    if ik:
+                        inchikey = ik
+                        break
+            elif isinstance(mnxm, str):
+                inchikey = self.mnxm_inchikey.get(mnxm)
+
+        if inchikey and not is_cofactor_cb(inchikey):
+            keys.append(inchikey)
+
+    return tuple(sorted(keys))
+
+
+def _fetch_reaction_ec_code(
+        self,
+        reaction,
+) -> Optional[str]:
+    """Resolve model EC code(s) to a BRENDA EC code using a callback.
+
+    Args:
+        reaction_ec_code: String EC code or list of EC codes from reaction annotation.
+        find_source_node_cb: Callback that maps an EC code to a canonical BRENDA EC
+            (may raise KeyError if not found).
+
+    Returns:
+        The first resolvable BRENDA EC code, or None if none resolve.
+    """
+    reaction_ec_code = r.annotation.get("ec-code", [])
+    if isinstance(reaction_ec_code, list):
+        #TODO: do not just use the first valid one in the list
+        for e in reaction_ec_code:
+            try:
+                ec = self._find_brenda_source_ec(e)
+                if ec:
+                    return ec
+            except KeyError:
+                continue
+        return None
+    elif isinstance(reaction_ec_code, str):
+        try:
+            return self._find_brenda_source_ec(reaction_ec_code)
+        except KeyError:
+            return None
+    else:
+        logging.warning(f"Cannot detect EC code type: {reaction_ec_code} ({type(reaction_ec_code)})")
+    return None
+
+
+def _process_one_reaction(
+    self,
+    r: Any,
+    *,
+    species_name: str,
+    inchikey_levels: int,
+    join_mode: str,
+    # callbacks (thread-safe, no mutation)
+    find_source_node_cb: Any,
+    is_cofactor_cb: Any,
+    filter_kin_entry_cb: Any,
+    search_kcat_sabiork_cb: Any,
+    summarize_values_cb: Any,
+    # data mappings
+    mnxm_inchikey: Dict[str, str],
+    brenda_ec_inchikey_kcat: Dict[str, Any],
+    brenda_ec_inchikey_sa: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """Compute DB annotations for a single reaction (pure, no model mutation)."""
+    logging.debug(f"------ {r.id} ------")
+
+    # Collect inputs
+    uniprot = self._fetch_uniprots_from_genes(r.genes)
+    brenda_ec_code = self._fetch_reaction_ec_code(, find_source_node_cb)
+    substrate_inchikey = _substrate_inchikey_tuple(r.reactants, is_cofactor_cb, mnxm_inchikey)
+
+    logging.debug(f"uniprot: {uniprot}")
+    logging.debug(f"brenda_ec_code: {brenda_ec_code}")
+    logging.debug(f"substrate_inchikey: {substrate_inchikey}")
+    logging.debug(f"species_name: {species_name}")
+
+    result: Dict[str, Any] = {}
+    if not brenda_ec_code:
+        return r.id, result
+
+    # (rest of the function unchanged … keep using f-strings for all logging)
+    return r.id, result
+
+
+def _search_kcat(
+    self: Any,
+    species_name: str,
+    inchikey_levels: int = 2,
+    join_mode: str = "mean",
+    closest_taxonomy: bool = True,
+    use_progressbar: bool = False,
+    max_workers: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Search for kcat/SA values for each reaction using BRENDA/SABIORK in parallel."""
+    reactions: List[Any] = list(self.model.reactions)
+    results: Dict[str, Any] = {}
+    iterator: Iterable[Any] = tqdm(reactions, desc="Database lookup of reaction kcat") if use_progressbar else reactions
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [
+            ex.submit(
+                _process_one_reaction,
+                r,
+                species_name=species_name,
+                inchikey_levels=inchikey_levels,
+                join_mode=join_mode,
+                find_source_node_cb=self._find_brenda_source_ec,
+                is_cofactor_cb=self._is_inchikey_cofactor,
+                filter_kin_entry_cb=self._filter_kinetic_entry,
+                search_kcat_sabiork_cb=self._search_kcat_sabiork,
+                summarize_values_cb=self._summarize_values,
+                mnxm_inchikey=self.mnxm_inchikey,
+                brenda_ec_inchikey_kcat=self.brenda_ec_inchikey_kcat,
+                brenda_ec_inchikey_sa=self.brenda_ec_inchikey_sa,
+            )
+            for r in iterator
+        ]
+
+        for fut in as_completed(futures):
+            rxn_id, ann = fut.result()
+            if ann:
+                # Apply on the main thread to avoid concurrent mutation of COBRA objects
+                rxn = self.model.reactions.get_by_id(rxn_id)
+                for key, value in ann.items():
+                    rxn.annotation[key] = value
+                results[rxn_id] = ann
+                logging.debug(f"Annotated reaction {rxn_id} with {list(ann.keys())}")
+
+    return results
+
+
+
+
+
+
+
+
+
+
+
+
     def _search_kcat(
         self,
         species_name: str, 
@@ -1079,14 +1285,14 @@ class EnzymeConstrainedModel(ModelBuilder):
                     #WARNING: only using one that works if there are multiple
                     for e in model_ec_code:
                         try:
-                            brenda_ec_code = self._find_source_node(e)
+                            brenda_ec_code = self._find_brenda_source_ec(e)
                             if brenda_ec_code:
                                 break
                         except KeyError:
                             pass
                 elif isinstance(model_ec_code, str):
                     try:
-                        brenda_ec_code = self._find_source_node(model_ec_code)
+                        brenda_ec_code = self._find_brenda_source_ec(model_ec_code)
                     except KeyError:
                         pass
                 else:
@@ -1197,7 +1403,7 @@ class EnzymeConstrainedModel(ModelBuilder):
                                     pass
                 if kcat_res:
                     #find the closest taxonomic member
-                    kcat, kcat_std = self._summarize_values(kcat_res, mode=join_mode)
+                    kcat, kcat_std = self._summarize_brenda_values(kcat_res, mode=join_mode)
                     if kcat:
                         r.annotation['DBkcat'] = {'kcat': kcat, 'kcat_std': kcat_std}
                 # SA
@@ -1221,7 +1427,7 @@ class EnzymeConstrainedModel(ModelBuilder):
                             except KeyError:
                                 pass
                 if sa_res:
-                    sa, sa_std = self._summarize_values(sa_res, mode=join_mode)
+                    sa, sa_std = self._summarize_brenda_values(sa_res, mode=join_mode)
                     if sa:
                         r.annotation['DBsa'] = {'sa': sa, 'sa_std': sa_std}
 
@@ -1254,29 +1460,31 @@ class EnzymeConstrainedModel(ModelBuilder):
         return G
     """
 
-    def _find_source_node(self, node) -> str:
+    def _find_brenda_source_ec(self, starting_ec_number) -> str:
         """
-        Find the furthest upstream source (node with in-degree 0) from a given node.
+        Find the furthest upstream source (starting_ec_number with in-degree 0) from a given EC
+        number in the graph construction of BRENDA. This ensures that no old
+        EC numbers or EC numbers that have a parent that is more used is used
 
         Args:
 
-            node: The starting node.
+            starting_ec_number: The starting starting_ec_number.
 
         Returns:
-            The source node if reachable, otherwise None.
+            The source starting_ec_number if reachable, otherwise None.
         """
-        current = node
-        visited = set()
-        if node not in self.brenda_ec_g:
-            raise KeyError(f'{node} is not in the graph')
+        current_ec_number = starting_ec_number
+        visited_ec_number = set()
+        if starting_ec_number not in self.brenda_ec_g:
+            raise KeyError(f'{starting_ec_number} is not in the graph')
         while True:
-            preds = list(self.brenda_ec_g.predecessors(current))
+            preds = list(self.brenda_ec_g.predecessors(current_ec_number))
             if not preds:
-                return current
-            if current in visited:
+                return current_ec_number
+            if current_ec_number in visited_ec_number:
                 return None  # Avoid infinite loops (e.g., in cycles)
-            visited.add(current)
-            current = preds[0]  # Assumes a tree or DAG with one upstream path
+            visited_ec_number.add(current_ec_number)
+            current_ec_number = preds[0]  # Assumes a tree or DAG with one upstream path
 
 
     def _is_inchikey_cofactor(self, inchikey):
@@ -1402,6 +1610,139 @@ class EnzymeConstrainedModel(ModelBuilder):
         return matches
 
 
+
+    def _filter_kinetic_entry(
+        self,
+        input_entry_ec_number: Dict,
+        species_name: Optional[str] = None,
+        closest_taxonomy: bool = False,
+        substrate_inchikey: Optional[Sequence[str] | Tuple[str, ...]] = None,
+        uniprot: Optional[Union[str, Sequence[str]]] = None,
+        inchikey_levels: int = 3,
+    ) -> Dict:
+        """Filter kinetic entries for an EC number by species, taxonomy proximity, substrates, and UniProt.
+
+        The filtering is applied in the following order:
+          1) Exact species filter (if `species_name` is provided).
+          2) Closest-taxonomy species selection (if `closest_taxonomy` is True).
+          3) Substrate filter via approximate InChIKey matching (`substrate_inchikey`, `inchikey_levels`).
+          4) UniProt intersection filter (`uniprot` as str or list/tuple of strings).
+
+        Args:
+            input_entry_ec_number: Nested mapping from substrate key → species → entry payload.
+            species_name: If provided, retain only entries for this organism.
+            closest_taxonomy: If True, retain only the species closest to `self.species_name`
+                according to ``self._rank_taxonomic_proximity``.
+            substrate_inchikey: One or more InChIKeys describing the substrate set to match
+                against substrate keys using ``self._find_matching_keys``.
+            uniprot: A UniProt accession string or a collection of accessions. If provided,
+                keep only entries whose 'uniprot' list intersects with this set.
+            inchikey_levels: Number of InChIKey layers used by the substrate matching routine.
+
+        Returns:
+            A filtered entry block with the same structure as `input_entry_ec_number`,
+            stripped of empty inner mappings. Returns an empty dict if nothing matches.
+
+        Notes:
+            - Missing 'uniprot' fields in payloads are treated as no match when `uniprot`
+              filtering is requested.
+            - The method assumes the class implements:
+                * ``self._rank_taxonomic_proximity(target: str, others: Iterable[str]) -> list[tuple[str, Any]]``
+                * ``self._find_matching_keys(input_keys: Iterable[Any], input_query: Sequence[str] | Tuple[str, ...], inchikey_layers: int) -> list[Any]``
+              and exposes ``self.species_name``.
+        """
+        current_ec_number = {}
+        # 1) Exact species filter
+        if species_name:
+            filtered_ec_number = {}
+            entry_ec_number = input_entry_ec_number
+            for substrates in entry_ec_number:
+                if species_name in entry_ec_number[substrates] and substrates not in filtered_ec_number:
+                    if substrates not in filtered_ec_number:
+                        filtered_ec_number[substrates] = {}
+                    filtered_ec_number[substrates] = entry_ec_number[substrates][species_name]
+            if filtered_ec_number:
+                current_ec_number = filtered_ec_number
+                logging.debug(f"After species filter ({species_name}): kept {len(current)} substrates")
+            else:
+                logging.debug(f"After species filter there are none left")
+                return {}
+
+        # 2) Closest taxonomy filter
+        if closest_taxonomy:
+            entry_ec_number = current_ec_number if current_ec_number else input_entry_ec_number
+            try:
+                other_orgs = sorted({sp for species_map in entry_ec_number.values() for sp in species_map.keys()})
+                if other_orgs:
+                    ranked = self._rank_taxonomic_proximity(target=self.species_name, others=other_orgs)
+                    # Expect ranked like [(best_species, score), ...]
+                    if ranked:
+                        to_keep_org = ranked[0][0] #the closest one
+                        filtered_ec_number = {i: {y: entry_ec_number[i][y]} for i in entry_ec_number for y in entry_ec_number[i] if y==to_keep_org}
+                        if filtered_ec_number:
+                            current_ec_number = filtered_ec_number
+                            logging.debug(f"After closest-taxonomy filter (kept: {to_keep_org}): {len(current)} substrates")
+                        else:
+                            logging.debug(f"After closest-taxonomy filter there are none left")
+                            return {}
+            except Exception as e:
+                # Be robust to ranking issues; keep unfiltered if ranking fails
+                logging.debug(f"Closest-taxonomy selection skipped due to error: {e}")
+
+        # 3) Substrate InChIKey approximate matching
+        if substrate_inchikey:
+            entry_ec_number = current_ec_number if current_ec_number else input_entry_ec_number
+            try:
+                candidate_keys = list(entry_ec_number.keys())
+                closest_substrates = self._find_matching_keys(
+                    input_keys=candidate_keys,
+                    input_query=tuple(substrate_inchikey),
+                    inchikey_layers=inchikey_levels,
+                )
+                if closest_substrates:
+                    filtered_ec_number = {sk: current[sk] for sk in closest_substrates if sk in entry_ec_number}
+                    if filtered_ec_number:
+                        current_ec_number = filtered_ec_number
+                        logging.debug(f"substrate_inchikey query: {substrate_inchikey}")
+                        logging.debug(f"closest_substrates matched: {closest_substrates}")
+                    else:
+                        logging.debug(f"After closest substrates filter there are none left")
+                        return {}
+            except Exception as e:
+                logging.debug(f"Substrate matching failed; skipping filter. Error: {e}")
+
+        # 4) UniProt filter (intersection)
+        if uniprot:
+            entry_ec_number = current_ec_number if current_ec_number else input_entry_ec_number
+            wanted = {uniprot} if isinstance(uniprot, str) else set(uniprot)
+            filtered = {}
+            for sk, species_map in entry_ec_number.items():
+                kept_species: Dict[str, Dict[str, Any]] = {}
+                for sp, payload in species_map.items():
+                    payload_uniprot = payload.get("uniprot")  # might be missing
+                    if isinstance(payload_uniprot, str):
+                        payload_set = {payload_uniprot}
+                    elif isinstance(payload_uniprot, (list, tuple, set)):
+                        payload_set = {u for u in payload_uniprot if u is not None}
+                    else:
+                        payload_set = set()
+                    if wanted & payload_set:
+                        kept_species[sp] = payload
+                if kept_species:
+                    filtered[sk] = kept_specie
+            if filtered:
+                current_ec_number = filtered
+                logging.debug(f"After UniProt filter ({len(wanted)} ids): kept {len(current)} substrates")
+            else:
+                logging.debug(f"After UniProt filter nothing has been removed")
+
+        # Drop empty inner maps
+        if current_ec_number:
+            return {sk: species_map for sk, species_map in current_ec_number.items() if species_map}
+        return {}
+
+
+    """ THIS IS THE OLD ONE -- TEST THAT THE ABOVE NEHAVES THE SAME
     def _filter_kinetic_entry(
         self,
         input_entry_ec_number, 
@@ -1462,6 +1803,7 @@ class EnzymeConstrainedModel(ModelBuilder):
             if entry_ec_number[i]:
                 res[i] = entry_ec_number[i]
         return res
+    """
 
 
     def _search_kcat_sabiork(
@@ -1603,7 +1945,7 @@ class EnzymeConstrainedModel(ModelBuilder):
         return ranked
 
 
-    def _summarize_values(
+    def _summarize_brenda_values(
         self,
         substrate_data: Dict,
         mode: str = 'mean',
