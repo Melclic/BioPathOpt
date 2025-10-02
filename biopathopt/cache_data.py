@@ -194,6 +194,7 @@ class Data:
         # Parse the reaction string into reactants and products
         reactants, products = self.parse_mnxr_equation(reac_str)
 
+
         # Convert reactants to their InChIKeys with the specified level of detail
         tmp_reactants = []
         for coefficient, mnxm in reactants:
@@ -208,11 +209,12 @@ class Data:
 
         return self.construct_reaction_string(tmp_reactants, tmp_products, inchikey_levels=inchikey_levels)
 
+
     def parse_mnxr_equation(
-            self, 
+            self,
             reac_str: str
     ) -> Tuple[List[List[str]], List[List[str]]]:
-        """Parses a metabolic network equation string from MetaNetX into reactants and products.
+        """Parses a metabolic network equation string from MetaNetX or RetroRules into reactants and products.
 
         This function takes a metabolic network equation string and parses it into
         lists of reactants and products. The input string should be in the form
@@ -223,26 +225,42 @@ class Data:
             reac_str (str): The metabolic network equation string.
 
         Returns:
-            Tuple[List[List[str]], List[List[str]]]: A tuple containing two lists:
+            Tuple[List[Tuple], List[Tuple]]: A tuple containing two lists:
                 - The first list contains lists of parsed reactants.
                 - The second list contains lists of parsed products.
         """
+        # Rescue map for symbolic stoichiometries
+        stoichio_rescue = {
+            '4n': 4, '3n': 3, '2n': 2, 'n': 1, '(n)': 1, '(N)': 1, '(2n)': 2, '(x)': 1,
+            'N': 1, 'm': 1, 'q': 1, '0.01': 1, '0.1': 1, '0.5': 1, '1.5': 1,
+            '0.02': 1, '0.2': 1, '(n-1)': 0, '(n-2)': -1
+        }
+        # Example chunk: "2 C00001@MNXM" -> ("2", "C00001")
+        single_reac_re = re.compile(r'(\(n-1\)|\d+|4n|3n|2n|n|\(n\)|\(N\)|\(2n\)|\(x\)|N|m|q|\(n\-2\)|\d+\.\d+) ([\w\d]+)@\w+')
+        
+        def parse_reaction_side(eq_side: str) -> Dict[str, int]:
+            """Parse reaction side"""
+            out = []
+            for sto, mnxm in single_reac_re.findall(eq_side):
+                mnxm = self.single_depr_mnxm(mnxm.strip())
+                try:
+                    out.append(
+                        (
+                            stoichio_rescue.get(sto.strip(), int(sto.strip())),
+                            mnxm
+                        )
+                    )
+                except ValueError:
+                    logging.warning(f"Cannot convert stoichiometry {sto} from {mnxm}")
+            return out
+        
         # Split the equation string into reactants and products
         reactants_str, products_str = reac_str.split('=')
-
-        # Split the reactants and products by the '+' symbol and strip any surrounding whitespace
-        reactants = [r.strip() for r in reactants_str.split('+')]
-        products = [p.strip() for p in products_str.split('+')]
-
-        # Further split each reactant and product by spaces
-        reactants = [r.split(' ') for r in reactants]
-        products = [p.split(' ') for p in products]
-
-        # Remove compartment information and other annotations following the '@' symbol
-        reactants = [[item.split('@')[0] for item in r] for r in reactants]
-        products = [[item.split('@')[0] for item in p] for p in products]
+        reactants = parse_reaction_side(reactants_str)
+        products = parse_reaction_side(products_str)
 
         return reactants, products
+
 
     # ############ MetaNetX specific #################
 
