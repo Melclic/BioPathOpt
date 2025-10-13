@@ -4,36 +4,44 @@ ARG BRENDA_FILE
 
 RUN conda update -n base -c defaults conda
 
+WORKDIR /home/BioPathOpt/
+
 COPY environment.yml .
 RUN conda env create -f environment.yml
 
-WORKDIR /home
-
-#do this more complicated for testing purposes
-RUN mkdir biopathopt
-
-#copy all the cache files
-RUN mkdir biopathopt/flatfiles/
-
-#copy all the non-generative data
-RUN mkdir biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/EC_kcat_max.json biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/edge_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50 biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/fingerprint_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/atom_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/sequence_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/bond_dict.pickle biopathopt/flatfiles/non_generative_data/
-
 #copy all the python
-COPY biopathopt/*.py biopathopt/
+WORKDIR /home/BioPathOpt/biopathopt/
+COPY biopathopt/*.py .
+
+WORKDIR /home/BioPathOpt/
 COPY setup.py .
 COPY requirements.txt . 
 COPY README.md .
 
-RUN conda run -n biopathopt pip install -e .
+#copy all the non-generative data
+WORKDIR /home/BioPathOpt/biopathopt/flatfiles/non_generative_data/
+COPY biopathopt/flatfiles/non_generative_data/EC_kcat_max.json .
+COPY biopathopt/flatfiles/non_generative_data/edge_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50 . 
+COPY biopathopt/flatfiles/non_generative_data/fingerprint_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/atom_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/sequence_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/bond_dict.pickle .
 
-COPY ${BRENDA_FILE} biopathopt/flatfiles/brenda.json.tar.gzip
-# build the cache
-RUN conda run -n biopathopt python -c "import biopathopt; d = biopathopt.Data(); d.refresh_cache(use_progressbar=True)"
+WORKDIR /home/BioPathOpt/
+RUN conda run -n biopathopt pip install -e .
+# check the cache to make sure it is complete
+RUN conda run -n biopathopt python -c "import biopathopt; d = biopathopt.Data(); d.refresh_cache()"
 RUN conda run -n biopathopt python -c "from ete3 import NCBITaxa; ncbi = NCBITaxa()"
+
+#make sure that the environment is default
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+ENV CONDA_DEFAULT_ENV=biopathopt
+ENV PATH=$CONDA_DIR/envs/$CONDA_DEFAULT_ENV/bin:$PATH
+RUN echo "source activate $CONDA_DEFAULT_ENV" >> ~/.bashrc
+RUN conda run -n biopathopt python -V
+#required so that we can launch the correct environment
+CMD ["bash"]
+
+WORKDIR /home/

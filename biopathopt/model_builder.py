@@ -21,7 +21,13 @@ This is a collection of functions to build a model
 
 class ModelBuilder(Data):
 
-    def __init__(self, path_to_model=None, use_progressbar=False, low_memory_mode=False):
+    def __init__(
+            self, 
+            path_to_model=None, 
+            use_progressbar=False, 
+            low_memory_mode=False,
+            taxonomy_id=None, 
+        ):
         """Class that inherits Data used to build a cobra model
         """
         super().__init__(low_memory_mode=low_memory_mode, use_progressbar=use_progressbar)
@@ -86,13 +92,27 @@ class ModelBuilder(Data):
             'UniProtKB': 'uniprot',
         }
 
+        #Read the model
         if path_to_model:
-            self._read_model(path_to_model, use_progressbar)
+            self._read_model(path_to_model)
         else:
             self.model = Model()
 
+        #Taxonomy
+        self.taxonomy_id = taxonomy_id
+        if not self.taxonomy_id:
+            if self.model:
+                self.taxonomy_id = self.model.annotation.get('taxonomy', None)
+        if species_name and not self.taxonomy_id:
+            self.taxonomy = self._get_taxid_from_species(species_name)
+        if self.taxonomy_id and not species_name:
+            self.species_name = self._get_species_name(self.taxonomy_id)
+        if self.model:
+            if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
+                self.model.annotation['taxonomy'] = self.taxonomy_id
 
-    def _read_model(self, path_to_model: str, use_progressbar: bool = False):
+
+    def _read_model(self, path_to_model: str):
         #read if gzip , sbml or json
         if path_to_model.endswith('json.gz') or path_to_model.endswith('json.gzip'):
             with gzip.open(path_to_model, 'rt', encoding='utf-8') as gz_file:
@@ -113,7 +133,7 @@ class ModelBuilder(Data):
             #update the reactions annotation keys
             #TODO
             #update the metabolite annotations
-            met_iterator = tqdm(self.model.metabolites, desc='Updating the metabolite annotations') if use_progressbar else self.model.metabolites
+            met_iterator = tqdm(self.model.metabolites, desc='Updating the metabolite annotations') if self.use_progressbar else self.model.metabolites
             for m in met_iterator:
                 m.annotation = utils.merge_annot_dicts(m.annotation, self._find_metabolite_xref(m.annotation))
             #BUG: remove nan or None
@@ -130,7 +150,7 @@ class ModelBuilder(Data):
                         _ = updated_annot.pop(i, None)
                 m.annotation = updated_annot
             #update the reaction annotations
-            reac_iterator = tqdm(self.model.reactions, desc='Updating the reaction annotations') if use_progressbar else self.model.reactions
+            reac_iterator = tqdm(self.model.reactions, desc='Updating the reaction annotations') if self.use_progressbar else self.model.reactions
             for r in reac_iterator:
                 r.annotation = utils.merge_annot_dicts(r.annotation, self._find_reaction_xref(r.annotation))
             #BUG: remove nan or None
@@ -682,12 +702,12 @@ class ModelBuilder(Data):
         
         #search for the inchi reaction
         if inchikey_levels==3:
-            for i in self.reac_prop:
-                if self.reac_prop[i]['inchikey_equation'] in all_equation_strings:
+            for i in self.mnxr_prop:
+                if self.mnxr_prop[i]['inchikey_equation'] in all_equation_strings:
                     return i
         elif inchikey_levels==2:
-            for i in self.reac_prop:
-                if self.reac_prop[i]['inchikey2_equation'] in all_equation_strings:
+            for i in self.mnxr_prop:
+                if self.mnxr_prop[i]['inchikey2_equation'] in all_equation_strings:
                     return i
         else:
             raise ValueError('We only handle InChIKey levels of 2 and 3')
@@ -821,10 +841,10 @@ class ModelBuilder(Data):
             Metabolite: A COBRApy `Metabolite` object populated with the specified data.
         """
 
-        chem_prop, fetched_mnxm  = self.mnxm_xref(mnxm)
+        mnxm_prop, fetched_mnxm  = self.mnxm_xref(mnxm)
         if not fetched_mnxm==mnxm:
             raise KeyError(f'You are using a deprecated {mnxm}')
-        chem_xref = chem_prop['xref']
+        chem_xref = mnxm_prop['xref']
         # Convert MetaNetX annotations to BiGG or other annotations
         annot_dict: Dict[str, list] = {}
         for prefix in chem_xref:
@@ -845,7 +865,7 @@ class ModelBuilder(Data):
             annot_dict[key] = list(np.unique(annot_dict[key]))
 
         # Add InChIKey to the annotation dictionary
-        annot_dict['inchi_key'] = chem_prop['InChIKey']
+        annot_dict['inchi_key'] = mnxm_prop['InChIKey']
 
         # Create a unique identifier for the metabolite
         if 'bigg.metabolite' in annot_dict:
@@ -857,8 +877,8 @@ class ModelBuilder(Data):
         # Create the COBRApy metabolite object
         met = Metabolite(
             id=uid,
-            formula=chem_prop['formula'],
-            name=chem_prop['name'],
+            formula=mnxm_prop['formula'],
+            name=mnxm_prop['name'],
             compartment=compartment_id,
         )
 
