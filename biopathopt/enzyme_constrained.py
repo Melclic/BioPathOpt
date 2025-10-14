@@ -52,6 +52,7 @@ class EnzymeConstrainedModel(ModelBuilder):
                 path_to_model=path_to_model, 
                 use_progressbar=use_progressbar, 
                 low_memory_mode=low_memory_mode,
+                species_name=species_name, 
                 taxonomy_id=taxonomy_id,
                 )
         #TODO: print the stats of uniprot, structure, etc... so that we can

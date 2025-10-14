@@ -661,7 +661,7 @@ class Data:
         taxid: int,
     ) -> str:
         """Return the species-level name from a taxonomy ID."""
-        if not self.ncbi
+        if not self.ncbi:
             self.ncbi = NCBITaxa()
         lineage = ncbi.get_lineage(taxid)
         names = ncbi.get_taxid_translator(lineage)

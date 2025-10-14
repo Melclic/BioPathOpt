@@ -27,6 +27,7 @@ class ModelBuilder(Data):
             use_progressbar=False, 
             low_memory_mode=False,
             taxonomy_id=None, 
+            species_name=None, 
         ):
         """Class that inherits Data used to build a cobra model
         """
@@ -100,12 +101,13 @@ class ModelBuilder(Data):
 
         #Taxonomy
         self.taxonomy_id = taxonomy_id
+        self.species_name = species_name
         if not self.taxonomy_id:
             if self.model:
                 self.taxonomy_id = self.model.annotation.get('taxonomy', None)
-        if species_name and not self.taxonomy_id:
-            self.taxonomy = self._get_taxid_from_species(species_name)
-        if self.taxonomy_id and not species_name:
+        if self.species_name and not self.taxonomy_id:
+            self.taxonomy = self._get_taxid_from_species(self.species_name)
+        if self.taxonomy_id and not self.species_name:
             self.species_name = self._get_species_name(self.taxonomy_id)
         if self.model:
             if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
