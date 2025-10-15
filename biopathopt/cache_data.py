@@ -1365,7 +1365,7 @@ class Data:
                         "The 1:1 assumption for keggr_mnxr is not respected for "
                         + str(i)
                     )
-            self._keggr_mnxr = {i: tmp[i][0] for i in tmp}
+            self._keggr_mnxr = {i: self.single_depr_mnxr(str(tmp[i][0])) for i in tmp}
         return self._keggr_mnxr
 
     @property
@@ -1391,7 +1391,7 @@ class Data:
                         "The 1:1 assumption for keggm_mnxm is not respected for "
                         + str(i)
                     )
-            self._keggm_mnxm = {i: tmp[i][0] for i in tmp}
+            self._keggm_mnxm = {i: self.single_depr_mnxm(str(tmp[i][0])) for i in tmp}
         return self._keggm_mnxm
 
     @property
@@ -1420,7 +1420,7 @@ class Data:
                         "the 1:1 assumption for chebim_mnxm is not respected for "
                         + str(i)
                     )
-            self._chebim_mnxm = {i: tmp[i][0] for i in tmp}
+            self._chebim_mnxm = {i: self.single_depr_mnxm(str(tmp[i][0])) for i in tmp}
         return self._chebim_mnxm
 
     @property
@@ -1444,13 +1444,13 @@ class Data:
 
     # #### Pubchem #####
 
-    def exact_pubchem_search(self, query: str, itype: str = 'name') -> Dict[str, Any]:
+    def exact_pubchem_search(self, query: str, itype: str = 'name', return_lowest_cid: bool = False) -> Dict[str, Any]:
         """
         Perform an exact search on PubChem using the given identifier.
 
         Args:
             query (str): The compound name or identifier to search.
-            itype (str): The type of identifier (e.g., 'name', 'smiles', 'inchi'). Defaults to 'name'.
+            itype (str): The type of identifier (e.g., 'name', 'smiles', 'inchi', 'inchikey'). Defaults to 'name'.
 
         Returns:
             Dict[str, Any]: A dictionary containing the compound data if found. Empty dict if not found or ambiguous.
@@ -1458,6 +1458,7 @@ class Data:
         Raises:
             KeyError: If multiple compounds are returned for the query.
         """
+        cid = {}
         cid_keys = [
             "canonical_smiles",
             "charge",
@@ -1465,6 +1466,7 @@ class Data:
             "elements",
             "exact_mass",
             "inchi",
+            "inchikey",
             "isomeric_smiles",
             "iupac_name",
             "molecular_formula",
@@ -1500,14 +1502,46 @@ class Data:
             # Cache and return the single result
             cid = cids[0].to_dict()
             cid = {i: cid.get(i) for i in cid_keys}
-            self.pubchem_search_cache[query.lower()] = cid
-            return cid
         else:
-            logging.debug('There are multiple results')
-            # Cache the empty result and raise an error for ambiguity
-            self.pubchem_search_cache[query.lower()] = {}
-            raise KeyError(f'Multiple cids {cids} for {query}')
-        return {}
+            logging.warning(f'There are multiple results for query: {query} - {itype}')
+            if return_lowest_cid:
+                cid = min(cids, key=lambda x: int(x.cid))
+                cid = cid.to_dict()
+                cid = {i: cid.get(i) for i in cid_keys}
+            else:
+                # Cache the empty result and raise an error for ambiguity
+                self.pubchem_search_cache[query.lower()] = {}
+                raise KeyError(f'Multiple cids {cids} for {query}')
+        #### xref ####
+        if 'cid' in cid:
+            r = requests.post(f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid.get("cid")}/xrefs/SBURL/JSON')
+            res_list = r.json()
+            xref = {}
+            xref['pubchem'] = [str(cid)]
+            for url in res_list['InformationList']['Information'][0]['SBURL']:
+                if 'https://biocyc.org/compound?orgid=META&id=' in url:
+                    if 'biocyc' not in xref:
+                        xref['biocyc'] = []
+                    xref['biocyc'].append(url.replace('https://biocyc.org/compound?orgid=META&id=', ''))
+                if 'http://www.hmdb.ca/cidbolites/' in url:
+                    if 'hmdb' not in xref:
+                        xref['hmdb'] = []
+                    xref['hmdb'].append(url.replace('http://www.hmdb.ca/cidbolites/', ''))
+                if 'http://www.genome.jp/dbget-bin/www_bget?cpd:' in url:
+                    if 'kegg.compound' not in xref:
+                        xref['kegg.compound'] = []
+                    xref['kegg.compound'].append(url.replace('http://www.genome.jp/dbget-bin/www_bget?cpd:', ''))
+                if 'http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:' in url:
+                    if 'chebi' not in xref:
+                        xref['chebi'] = []
+                    xref['chebi'].append('CHEBI:'+url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', ''))
+                    xref['chebi'].append(url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', ''))
+            xref['inchi'] = cid.get('inchi')
+            xref['inchi_key'] = cid.get('inchikey')
+            xref['smiles'] = cid.get('canonical_smiles')
+            cid['xref'] = xref
+        self.pubchem_search_cache[query.lower()] = cid
+        return cid
     
 
     def molecule_name_search_inchikey(self, name: str) -> Optional[str]:
@@ -1695,6 +1729,8 @@ class Data:
         #  properties
         cp = self.single_mnxm_prop(_mnxm)
         cp["xref"] = xref
+        if not cp:
+            raise KeyError(f'Cannot find the cross reference for {mnxm}')
         if "metanetx.chemical" not in cp["xref"]:
             cp["xref"]["metanetx.chemical"] = [_mnxm]
         return cp, _mnxm
