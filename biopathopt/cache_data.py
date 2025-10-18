@@ -28,7 +28,7 @@ from ete3 import NCBITaxa
 
 from typing import Tuple, Dict, List, Union, Optional, Any
 
-from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract, stream_json
+from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract, stream_json, replace_none_with_empty
 
 """Collection of functions that fetch data from MetaNetX
 
@@ -1512,34 +1512,51 @@ class Data:
                 # Cache the empty result and raise an error for ambiguity
                 self.pubchem_search_cache[query.lower()] = {}
                 raise KeyError(f'Multiple cids {cids} for {query}')
+        logging.debug(f'pubchem CID is {cid}')
         #### xref ####
+        xref = {}
         if 'cid' in cid:
             r = requests.post(f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid.get("cid")}/xrefs/SBURL/JSON')
             res_list = r.json()
-            xref = {}
-            xref['pubchem'] = [str(cid)]
-            for url in res_list['InformationList']['Information'][0]['SBURL']:
+            xref['pubchem'] = [str(cid.get('cid'))]
+            for url in res_list.get('InformationList', {}).get('Information', [{}])[0].get('SBURL', []):
                 if 'https://biocyc.org/compound?orgid=META&id=' in url:
-                    if 'biocyc' not in xref:
-                        xref['biocyc'] = []
-                    xref['biocyc'].append(url.replace('https://biocyc.org/compound?orgid=META&id=', ''))
+                    xref.setdefault('biocyc', []).append(
+                        url.replace('https://biocyc.org/compound?orgid=META&id=', '')
+                    )
                 if 'http://www.hmdb.ca/cidbolites/' in url:
-                    if 'hmdb' not in xref:
-                        xref['hmdb'] = []
-                    xref['hmdb'].append(url.replace('http://www.hmdb.ca/cidbolites/', ''))
+                    xref.setdefault('hmdb', []).append(
+                        url.replace('http://www.hmdb.ca/cidbolites/', '')
+                    )
                 if 'http://www.genome.jp/dbget-bin/www_bget?cpd:' in url:
-                    if 'kegg.compound' not in xref:
-                        xref['kegg.compound'] = []
-                    xref['kegg.compound'].append(url.replace('http://www.genome.jp/dbget-bin/www_bget?cpd:', ''))
+                    xref.setdefault('kegg.compound', []).append(
+                        url.replace('http://www.genome.jp/dbget-bin/www_bget?cpd:', '')
+                    )
                 if 'http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:' in url:
-                    if 'chebi' not in xref:
-                        xref['chebi'] = []
-                    xref['chebi'].append('CHEBI:'+url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', ''))
-                    xref['chebi'].append(url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', ''))
-            xref['inchi'] = cid.get('inchi')
-            xref['inchi_key'] = cid.get('inchikey')
-            xref['smiles'] = cid.get('canonical_smiles')
-            cid['xref'] = xref
+                    xref.setdefault('chebi', []).append(
+                        'CHEBI:' + url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', '')
+                    )
+                    xref['chebi'].append(
+                        url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', '')
+                    )
+        xref['inchi'] = cid.get('inchi', '')
+        xref['inchikey'] = cid.get('inchikey', '')
+        xref['smiles'] = cid.get('canonical_smiles', '')
+        cid['xref'] = xref
+
+        cid['name'] = cid.pop('iupac_name')
+        cid['formula'] = cid.pop('molecular_formula')
+        cid['mass'] = cid.pop('exact_mass')
+
+        cid['InChI'] = cid.pop('inchi')
+        cid['InChIKey'] = cid.pop('inchikey')
+        cid['SMILES'] = cid.pop('canonical_smiles')
+        cid.pop('cid')
+        cid.pop('elements')
+        cid.pop('isomeric_smiles')
+        cid['weight'] = cid.pop('molecular_weight')
+
+        cid = replace_none_with_empty(cid)
         self.pubchem_search_cache[query.lower()] = cid
         return cid
     

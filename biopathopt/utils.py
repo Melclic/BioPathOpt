@@ -28,6 +28,33 @@ def stream_json(path: str, pointer: str = "item") -> Generator[Tuple[str, Any, i
             yield key, value, fileobj.tell()
 '''
 
+def replace_none_with_empty(d: dict) -> dict:
+    """
+    Recursively replace all None values with empty strings in a nested dictionary.
+
+    Args:
+        d (dict): Dictionary that may contain nested dicts or lists.
+
+    Returns:
+        dict: A new dictionary with None values replaced by ''.
+    """
+    new_d = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            # Recursively clean nested dicts
+            new_d[k] = replace_none_with_empty(v)
+        elif isinstance(v, list):
+            # Handle lists that may contain dicts or None
+            new_d[k] = [
+                replace_none_with_empty(i) if isinstance(i, dict)
+                else ('' if i is None else i)
+                for i in v
+            ]
+        else:
+            # Replace direct None values
+            new_d[k] = '' if v is None else v
+    return new_d
+
 def stream_json(path: str, pointer: str = "item") -> Generator[Tuple[str, Any, int], None, None]:
     """Stream a JSON file (supports .json, .json.gz, and .json.tar.gz) and yield (key, value, bytes_read).
 
