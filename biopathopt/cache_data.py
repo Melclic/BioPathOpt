@@ -302,6 +302,7 @@ class Data:
                     if tmp[0] != "EMPTY":
                         return tmp[0]
                 elif len(tmp) > 1:
+                    #TODO: return the one with the most xref information
                     logging.warning(
                         "Cannot determine with certainty the ID "
                         + str(mnxr)
@@ -338,6 +339,7 @@ class Data:
                     return tmp[0]
                 elif len(tmp) > 1:
                     if not strict:
+                        #TODO: return the one with the most xref information
                         logging.warning(
                             "Cannot determine with certainty the ID "
                             + str(mnxm)
