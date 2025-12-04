@@ -45,3 +45,4 @@ RUN conda run -n biopathopt python -V
 CMD ["bash"]
 
 WORKDIR /home/
+COPY scripts/extract_sink.py .
