@@ -665,9 +665,9 @@ class Data:
         """Return the species-level name from a taxonomy ID."""
         if not self.ncbi:
             self.ncbi = NCBITaxa()
-        lineage = ncbi.get_lineage(taxid)
-        names = ncbi.get_taxid_translator(lineage)
-        ranks = ncbi.get_rank(lineage)
+        lineage = self.ncbi.get_lineage(taxid)
+        names = self.ncbi.get_taxid_translator(lineage)
+        ranks = self.ncbi.get_rank(lineage)
 
         for tid in lineage:
             if ranks[tid] == "species":
