@@ -16,4 +16,5 @@ PubChemPy
 torch
 rdkit
 scikit-learn
-
+ijson
+plotly

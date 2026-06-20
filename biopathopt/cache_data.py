@@ -6,6 +6,7 @@ import logging
 import difflib
 import os
 import tempfile
+import tarfile
 import time
 import urllib.request
 from tqdm import tqdm
@@ -23,11 +24,11 @@ import requests
 import pubchempy as pcp
 from urllib.error import URLError
 from http.client import RemoteDisconnected
-
+from ete3 import NCBITaxa
 
 from typing import Tuple, Dict, List, Union, Optional, Any
 
-from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract, stream_json
+from biopathopt.utils import fuzzy_dict_lookup, inchikey_layer_extract, stream_json, replace_none_with_empty
 
 """Collection of functions that fetch data from MetaNetX
 
@@ -55,8 +56,8 @@ class Data:
         self.base_dir = os.path.dirname(os.path.realpath(__file__))
         self._chem_xref = None
         self._reac_xref = None
-        self._chem_prop = None
-        self._reac_prop = None
+        self._mnxm_prop = None
+        self._mnxr_prop = None
         self._biggm_mnxm = None
         self._biggr_mnxr = None
         self._inchikey_mnxm = None
@@ -71,6 +72,7 @@ class Data:
         self._brenda_ec_inchikey_kcat = {}
         self._brenda_ec_inchikey_sa = {}
         self._brenda_ec_g = None
+        self._rr_prop = None
         #  these are the user overwrites
         self.inchikey_overwrite = {
             "GPRLSGONYQIRFK-FTGQXOHASA-N": "GPRLSGONYQIRFK-UHFFFAOYSA-N",
@@ -79,17 +81,23 @@ class Data:
             "ONVABDHFQKWOSV-ZJXASSBSSA-N": "ONVABDHFQKWOSV-HPUSYDDDSA-N",
         }
         self.mnxm_overwrite = {
-                "MNXM38": "MNXM1105762",
-                "MNXM01": "MNXM1",
+            "MNXM38": "MNXM1105762",
+            "MNXM01": "MNXM1",
+            "MNXM739518": "MNXM1371312",
         }
-        self.biggr_overwrite = {"GLUDyi": "GLUDy"}
+        self.mnxr_overwrite = {
+            "MNXR94682": "MNXR198841",
+        }
+        self.biggr_overwrite = {
+            "GLUDyi": "GLUDy",
+        }
         #  other function specfic
         self.pubchem_search_cache = {}
         self.pubchem_min_start = 0.0
         self.pubchem_min_count = 0
         self.pubchem_sec_start = 0.0
         self.pubchem_sec_count = 0
-        #self.ncbi = None
+        self.ncbi = None
         self.fuzzy_search_cache = {}
         self.brenda_rest_retries = 50
         """
@@ -106,8 +114,8 @@ class Data:
     def flush_parameters(self):
         self._chem_xref = None
         self._reac_xref = None
-        self._chem_prop = None
-        self._reac_prop = None
+        self._mnxm_prop = None
+        self._mnxr_prop = None
         self._biggm_mnxm = None
         self._biggr_mnxr = None
         self._inchikey_mnxm = None
@@ -122,6 +130,11 @@ class Data:
         self._brenda_ec_inchikey_kcat = {}
         self._brenda_ec_inchikey_sa = {}
         self._brenda_ec_g = None
+        self._rr_prop = None
+
+    ###########################
+    ######### PARSE ###########
+    ###########################
 
     def construct_reaction_string(
             self,
@@ -194,6 +207,7 @@ class Data:
         # Parse the reaction string into reactants and products
         reactants, products = self.parse_mnxr_equation(reac_str)
 
+
         # Convert reactants to their InChIKeys with the specified level of detail
         tmp_reactants = []
         for coefficient, mnxm in reactants:
@@ -208,11 +222,12 @@ class Data:
 
         return self.construct_reaction_string(tmp_reactants, tmp_products, inchikey_levels=inchikey_levels)
 
+
     def parse_mnxr_equation(
-            self, 
+            self,
             reac_str: str
     ) -> Tuple[List[List[str]], List[List[str]]]:
-        """Parses a metabolic network equation string from MetaNetX into reactants and products.
+        """Parses a metabolic network equation string from MetaNetX or RetroRules into reactants and products.
 
         This function takes a metabolic network equation string and parses it into
         lists of reactants and products. The input string should be in the form
@@ -223,26 +238,42 @@ class Data:
             reac_str (str): The metabolic network equation string.
 
         Returns:
-            Tuple[List[List[str]], List[List[str]]]: A tuple containing two lists:
+            Tuple[List[Tuple], List[Tuple]]: A tuple containing two lists:
                 - The first list contains lists of parsed reactants.
                 - The second list contains lists of parsed products.
         """
+        # Rescue map for symbolic stoichiometries
+        stoichio_rescue = {
+            '4n': 4, '3n': 3, '2n': 2, 'n': 1, '(n)': 1, '(N)': 1, '(2n)': 2, '(x)': 1,
+            'N': 1, 'm': 1, 'q': 1, '0.01': 1, '0.1': 1, '0.5': 1, '1.5': 1,
+            '0.02': 1, '0.2': 1, '(n-1)': 0, '(n-2)': -1
+        }
+        # Example chunk: "2 C00001@MNXM" -> ("2", "C00001")
+        single_reac_re = re.compile(r'(\(n-1\)|\d+|4n|3n|2n|n|\(n\)|\(N\)|\(2n\)|\(x\)|N|m|q|\(n\-2\)|\d+\.\d+) ([\w\d]+)@\w+')
+        
+        def parse_reaction_side(eq_side: str) -> Dict[str, int]:
+            """Parse reaction side"""
+            out = []
+            for sto, mnxm in single_reac_re.findall(eq_side):
+                mnxm = self.single_depr_mnxm(mnxm.strip())
+                try:
+                    out.append(
+                        (
+                            stoichio_rescue.get(sto.strip(), int(sto.strip())),
+                            mnxm
+                        )
+                    )
+                except ValueError:
+                    logging.warning(f"Cannot convert stoichiometry {sto} from {mnxm}")
+            return out
+        
         # Split the equation string into reactants and products
         reactants_str, products_str = reac_str.split('=')
-
-        # Split the reactants and products by the '+' symbol and strip any surrounding whitespace
-        reactants = [r.strip() for r in reactants_str.split('+')]
-        products = [p.strip() for p in products_str.split('+')]
-
-        # Further split each reactant and product by spaces
-        reactants = [r.split(' ') for r in reactants]
-        products = [p.split(' ') for p in products]
-
-        # Remove compartment information and other annotations following the '@' symbol
-        reactants = [[item.split('@')[0] for item in r] for r in reactants]
-        products = [[item.split('@')[0] for item in p] for p in products]
+        reactants = parse_reaction_side(reactants_str)
+        products = parse_reaction_side(products_str)
 
         return reactants, products
+
 
     # ############ MetaNetX specific #################
 
@@ -259,6 +290,10 @@ class Data:
         logging.debug("---- single_depr_mnxr ------")
         if mnxr:
             try:
+                return self.mnxr_overwrite[mnxr]
+            except KeyError:
+                pass
+            try:
                 tmp = []
                 for i in list(nx.dfs_tree(self.g_depr_mnxr, source=mnxr)):
                     if not list(self.g_depr_mnxr.successors(i)):
@@ -267,7 +302,8 @@ class Data:
                     if tmp[0] != "EMPTY":
                         return tmp[0]
                 elif len(tmp) > 1:
-                    logging.debug(
+                    #TODO: return the one with the most xref information
+                    logging.warning(
                         "Cannot determine with certainty the ID "
                         + str(mnxr)
                         + ": "
@@ -303,7 +339,8 @@ class Data:
                     return tmp[0]
                 elif len(tmp) > 1:
                     if not strict:
-                        logging.debug(
+                        #TODO: return the one with the most xref information
+                        logging.warning(
                             "Cannot determine with certainty the ID "
                             + str(mnxm)
                             + ": "
@@ -315,7 +352,7 @@ class Data:
                 pass
         return mnxm
 
-    def single_chem_prop(self, mnxm):
+    def single_mnxm_prop(self, mnxm):
         """Unify the search of MetaNetX molecule id's. First assume that
         the id is correct, then check that its not an old ID and if not,
         check the deprecated maps and return the closest. Because of
@@ -326,12 +363,12 @@ class Data:
         Returns:
             str: The non-deprecated MetaNetX molecule id
         """
-        #  logging.debug('------ single_chem_prop -------')
+        #  logging.debug('------ single_mnxm_prop -------')
         try:
-            return self.chem_prop[mnxm]
+            return self.mnxm_prop[mnxm]
         except KeyError:
             try:
-                return self.chem_prop[self.single_depr_mnxm(mnxm)]
+                return self.mnxm_prop[self.single_depr_mnxm(mnxm)]
             except KeyError:
                 try:
                     search_mnxm = self.single_depr_mnxm(mnxm)
@@ -344,7 +381,7 @@ class Data:
                         ))
                     for i in depr_lst:
                         try:
-                            return self.chem_prop[i]
+                            return self.mnxm_prop[i]
                         except KeyError:
                             pass
                 except nx.exception.NetworkXError as e:
@@ -352,7 +389,7 @@ class Data:
         logging.warning("Cannot find chem properties for: " + str(mnxm))
         return {}
 
-    def single_reac_prop(self, mnxr):
+    def single_mnxr_prop(self, mnxr):
         """Unify the search of MetaNetX reaction id's. First assume that
         the id is correct, then check that its not an old ID. Because of
         protonation you may have duplicates and thus the deprecated map.
@@ -362,12 +399,12 @@ class Data:
         Returns:
             str: The non-deprecated MetaNetX reaction id
         """
-        logging.debug("------ single_reac_prop ------")
+        logging.debug("------ single_mnxr_prop ------")
         try:
-            return self.reac_prop[mnxr]
+            return self.mnxr_prop[mnxr]
         except KeyError:
             try:
-                return self.reac_prop[self.single_depr_mnxr(mnxr)]
+                return self.mnxr_prop[self.single_depr_mnxr(mnxr)]
             except KeyError:
                 pass
                 """
@@ -384,108 +421,6 @@ class Data:
         return {}
 
     # ############# BRENDA ######################
-    # Here we parse the brenda file and return the substrate kcat values
-
-    @property
-    def brenda_ec_g(self):
-        if not self._brenda_ec_g:
-            logging.debug('-------- brenda_ec_g ---------')
-            logging.debug('Populating.....')
-            path_file = os.path.join(
-                self.base_dir, "flatfiles/brenda_ec_g.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_g = pickle.load(f)
-            else:
-                ### generate it ####
-                def extract_history_ec(text):
-                    match = re.search(r'EC\s+(\d+\.\d+\.\d+\.\d+)', text)
-                    if match:
-                        ec_number = match.group(1)
-                        return ec_number
-                    return None
-                G = nx.DiGraph()
-                # check that the brenda file is there
-                brenda_path_file = os.path.join(
-                    self.base_dir, "flatfiles/brenda.json.tar.gz"
-                )
-                if not os.path.exists(brenda_path_file):
-                    raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
-                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
-                    G.add_node(ec_number)    
-                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
-                    if 'history' in ec_entry:
-                        to_ec = extract_history_ec(
-                            ec_entry['history']
-                        )
-                        if to_ec:
-                            G.add_edge(to_ec, ec_number)
-
-                with open(path_file, 'wb') as f:
-                    pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
-                self._brenda_ec_g = G
-        return self._brenda_ec_g
-
-    @property
-    def brenda_ec_inchikey_kcat(self):
-        if not self._brenda_ec_inchikey_kcat:
-            logging.debug("------ brenda_ec_inchikey_kcat -----")
-            logging.debug("\t-> Populating...")
-            path_file = os.path.join(
-                #self.base_dir, "flatfiles/brenda_ec_inchikey_kcat.pkl"
-                self.base_dir, "flatfiles/brenda_kcat.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_inchikey_kcat = pickle.load(f)
-            else:
-                for attempt in range(1, self.brenda_rest_retries + 1):
-                    try:
-                        self._generate_brenda_kinetics(
-                                parse_type='kcat', 
-                                use_progressbar=self.use_progressbar, 
-                            )
-                        break  # success, exit loop
-                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
-                        logging.warning(f'The following eror: {e}... retrying')
-                        if attempt >= self.brenda_rest_retries:
-                            raise e # give up after last attempt
-                        time.sleep(5.0)
-                with open(path_file, 'wb') as f:
-                    pickle.dump(self._brenda_ec_inchikey_kcat, f, pickle.HIGHEST_PROTOCOL)
-        return self._brenda_ec_inchikey_kcat
-
-
-    @property
-    def brenda_ec_inchikey_sa(self):
-        if not self._brenda_ec_inchikey_sa:
-            logging.debug("------ brenda_ec_inchikey_sa -----")
-            logging.debug("\t-> Populating...")
-            path_file = os.path.join(
-                #self.base_dir, "flatfiles/brenda_ec_inchikey_sa.pkl"
-                self.base_dir, "flatfiles/brenda_sa.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_inchikey_sa = pickle.load(f)
-            else:
-                for attempt in range(1, self.brenda_rest_retries + 1):
-                    try:
-                        self._generate_brenda_kinetics(
-                                parse_type='sa', 
-                                use_progressbar=self.use_progressbar, 
-                            )
-                        break  # success, exit loop
-                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
-                        logging.warning(f'The following eror: {e}... retrying')
-                        if attempt >= self.brenda_rest_retries:
-                            raise e# give up after last attempt
-                        time.sleep(5.0)
-                with open(path_file, 'wb') as f:
-                    pickle.dump(self._brenda_ec_inchikey_sa, f, pickle.HIGHEST_PROTOCOL)
-        return self._brenda_ec_inchikey_sa
-
 
     def _get_protein_reactants_inchikey(self, ec_entry, protein_ids=[]):
         #because the comments do not always have the right substrates, get the original reaction from the protein
@@ -723,6 +658,22 @@ class Data:
 
     ##### taxonomy ###
 
+    def _get_species_name(
+        self,
+        taxid: int,
+    ) -> str:
+        """Return the species-level name from a taxonomy ID."""
+        if not self.ncbi:
+            self.ncbi = NCBITaxa()
+        lineage = self.ncbi.get_lineage(taxid)
+        names = self.ncbi.get_taxid_translator(lineage)
+        ranks = self.ncbi.get_rank(lineage)
+
+        for tid in lineage:
+            if ranks[tid] == "species":
+                return names[tid]
+        return names.get(taxid, "Unknown")
+
     '''
     def _get_species_name(self, taxid: int) -> str:
         """Return the species-level name from a taxonomy ID."""
@@ -736,7 +687,7 @@ class Data:
             if ranks[tid] == "species":
                 return names[tid]
         return names.get(taxid, None)
-
+    '''
 
     def _get_taxid_from_species(self, species_name: str) -> Optional[int]:
         """
@@ -760,16 +711,190 @@ class Data:
         except Exception as e:
             logging.warning(f"Failed to retrieve taxid for '{species_name}': {e}")
             return None
-    '''
 
-
-    # ######### data properties ###################################
+    # ###########################################
+    # ###### PROPERTIES #########################
+    # ###########################################
     #  These are designed to behave as parameters. The first time its called it
     #  will load, and the next time around it will pass the saved parameter
+
+    # ############# BRENDA ######################
+
+    @property
+    def brenda_ec_g(self):
+        if not self._brenda_ec_g:
+            logging.debug('-------- brenda_ec_g ---------')
+            logging.debug('Populating.....')
+            path_file = os.path.join(
+                self.base_dir, "flatfiles/brenda_ec_g.pkl"
+            )
+            if os.path.exists(path_file):
+                with open(path_file, 'rb') as f:
+                    self._brenda_ec_g = pickle.load(f)
+            else:
+                ### generate it ####
+                def extract_history_ec(text):
+                    match = re.search(r'EC\s+(\d+\.\d+\.\d+\.\d+)', text)
+                    if match:
+                        ec_number = match.group(1)
+                        return ec_number
+                    return None
+                G = nx.DiGraph()
+                # check that the brenda file is there
+                brenda_path_file = os.path.join(
+                    self.base_dir, "flatfiles/brenda.json.tar.gz"
+                )
+                if not os.path.exists(brenda_path_file):
+                    raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
+                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+                    G.add_node(ec_number)    
+                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
+                    if 'history' in ec_entry:
+                        to_ec = extract_history_ec(
+                            ec_entry['history']
+                        )
+                        if to_ec:
+                            G.add_edge(to_ec, ec_number)
+
+                with open(path_file, 'wb') as f:
+                    pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
+                self._brenda_ec_g = G
+        return self._brenda_ec_g
+
+    @property
+    def brenda_ec_inchikey_kcat(self):
+        if not self._brenda_ec_inchikey_kcat:
+            logging.debug("------ brenda_ec_inchikey_kcat -----")
+            logging.debug("\t-> Populating...")
+            path_file = os.path.join(
+                #self.base_dir, "flatfiles/brenda_ec_inchikey_kcat.pkl"
+                self.base_dir, "flatfiles/brenda_kcat.pkl"
+            )
+            if os.path.exists(path_file):
+                with open(path_file, 'rb') as f:
+                    self._brenda_ec_inchikey_kcat = pickle.load(f)
+            else:
+                for attempt in range(1, self.brenda_rest_retries + 1):
+                    try:
+                        self._generate_brenda_kinetics(
+                                parse_type='kcat', 
+                                use_progressbar=self.use_progressbar, 
+                            )
+                        break  # success, exit loop
+                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
+                        logging.warning(f'The following eror: {e}... retrying')
+                        if attempt >= self.brenda_rest_retries:
+                            raise e # give up after last attempt
+                        time.sleep(5.0)
+                with open(path_file, 'wb') as f:
+                    pickle.dump(self._brenda_ec_inchikey_kcat, f, pickle.HIGHEST_PROTOCOL)
+        return self._brenda_ec_inchikey_kcat
+
+
+    @property
+    def brenda_ec_inchikey_sa(self):
+        if not self._brenda_ec_inchikey_sa:
+            logging.debug("------ brenda_ec_inchikey_sa -----")
+            logging.debug("\t-> Populating...")
+            path_file = os.path.join(
+                #self.base_dir, "flatfiles/brenda_ec_inchikey_sa.pkl"
+                self.base_dir, "flatfiles/brenda_sa.pkl"
+            )
+            if os.path.exists(path_file):
+                with open(path_file, 'rb') as f:
+                    self._brenda_ec_inchikey_sa = pickle.load(f)
+            else:
+                for attempt in range(1, self.brenda_rest_retries + 1):
+                    try:
+                        self._generate_brenda_kinetics(
+                                parse_type='sa', 
+                                use_progressbar=self.use_progressbar, 
+                            )
+                        break  # success, exit loop
+                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
+                        logging.warning(f'The following eror: {e}... retrying')
+                        if attempt >= self.brenda_rest_retries:
+                            raise e# give up after last attempt
+                        time.sleep(5.0)
+                with open(path_file, 'wb') as f:
+                    pickle.dump(self._brenda_ec_inchikey_sa, f, pickle.HIGHEST_PROTOCOL)
+        return self._brenda_ec_inchikey_sa
+
+    ###### RETRORULES #########
+
+    @property
+    def retrorules_prop(self):
+        """Return the properties of retrorules2 
+
+        This function will download the following file 
+        https://zenodo.org/record/5828017/files/retrorules_rr02_rp2_hs.tar.gz
+        that describe the retrorules properties of rules used byt rp2
+
+        Args:
+        Returns:
+            dict: RetroRules rules properties
+        """
+        def _same_or_zero(lst: list[int]) -> int:
+            """Return the integer if both elements in list are equal, else 0."""
+            return lst[0] if len(lst) == 2 and lst[0] == lst[1] else 0
+
+        if not self._rr_prop:
+            logging.debug("------ retrorules_prop ----")
+            logging.debug("\t-> Populating...")
+            rr_prop_path = os.path.join(self.base_dir, "flatfiles/rr_prop.json.gz")
+            if not os.path.exists(rr_prop_path):
+                logging.info("RetroRules 2 prop does not exist... generating it")
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    rr_prop_ori_path = os.path.join(tmpdirname, "rr_prop.tsv")
+                    tmp_tar_path = os.path.join(tmpdirname, 'tmp.tar.gz')
+                    urllib.request.urlretrieve(
+                        "https://zenodo.org/record/5828017/files/retrorules_rr02_rp2_hs.tar.gz",
+                        tmp_tar_path,
+                    )
+                    with tarfile.open(tmp_tar_path, "r:gz") as tar:
+                        tar.extractall(path=tmpdirname)
+                    rr_prop = pd.read_csv(
+                        os.path.join(tmpdirname, "retrorules_rr02_rp2_hs", "retrorules_rr02_rp2_flat_all.csv")
+                    )
+                    rr_prop['mnxr'] = [self.single_depr_mnxr(i.split('_')[0]) for i in rr_prop['Legacy ID']]
+                    rr_prop['mnxm'] = [self.single_depr_mnxm(i.split('_')[1]) for i in rr_prop['Legacy ID']]
+                    retrorules_prop = {}
+                    for index, r in rr_prop.iterrows():
+                        #merge those that are the same
+                        if not r['Rule ID'] in retrorules_prop:
+                            retrorules_prop[r['Rule ID']] = {}
+                        if not r['mnxr'] in retrorules_prop[r['Rule ID']]:
+                            retrorules_prop[r['Rule ID']][r['mnxr']] = {}
+                        if r['mnxm'] in retrorules_prop[r['Rule ID']][r['mnxr']]:
+                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['ec'] = list(set(
+                                    [y for y in r['EC number'].split(';') if y!='NOEC']+retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['ec']
+                                ))
+                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['rule_score'] = float(np.mean([
+                                    r['Score normalized'],
+                                    float(retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['rule_score']),
+                                ]))
+                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['direction'] = _same_or_zero(
+                                    [
+                                        int(r['Rule relative direction']), 
+                                        retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['direction'],
+                                    ]
+                                )
+                        else:
+                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']] = {
+                                'ec': [y for y in r['EC number'].split(';') if y!='NOEC'],
+                                'rule_score': float(r['Score normalized']),
+                                'direction': int(r['Rule relative direction']),
+                            }
+                    compress_json.dump(retrorules_prop, rr_prop_path)
+                    rr_prop = None
+            self._rr_prop = compress_json.load(rr_prop_path)
+        return self._rr_prop
+
 
     #  ######### MetaNetX ###################
     #  taken from metnetx website. All the deprecated version of the ID's to the current id's
     #  important because we use an older version of metanetx id's
+
 
     @property
     def g_depr_mnxr(self):
@@ -978,7 +1103,7 @@ class Data:
         return self._g_depr_mnxm
 
     @property
-    def chem_prop(self):
+    def mnxm_prop(self):
         """Return the chemical properties of molecules
 
         This function will download the following file https://www.metanetx.org/cgi-bin/mnxget/mnxref/chem_prop.tsv that
@@ -988,24 +1113,24 @@ class Data:
         Returns:
             dict: Chemical properties from MetaNetX
         """
-        if not self._chem_prop:
-            logging.debug("------ chem_prop ----")
+        if not self._mnxm_prop:
+            logging.debug("------ mnxm_prop ----")
             logging.debug("\t-> Populating...")
-            chem_prop_path = os.path.join(self.base_dir, "flatfiles/chem_prop.json.gz")
-            if not os.path.exists(chem_prop_path):
+            mnxm_prop_path = os.path.join(self.base_dir, "flatfiles/mnxm_prop.json.gz")
+            if not os.path.exists(mnxm_prop_path):
                 logging.info("Chem prop does not exist... generating it")
                 with tempfile.TemporaryDirectory() as tmpdirname:
-                    chem_prop_ori_path = os.path.join(tmpdirname, "chem_prop.tsv")
+                    mnxm_prop_ori_path = os.path.join(tmpdirname, "mnxm_prop.tsv")
                     urllib.request.urlretrieve(
                         "https://www.metanetx.org/cgi-bin/mnxget/mnxref/chem_prop.tsv",
-                        chem_prop_ori_path,
+                        mnxm_prop_ori_path,
                     )
-                    chem_prop = pd.read_csv(
-                        chem_prop_ori_path, comment="#", sep="\t", header=None
+                    mnxm_prop = pd.read_csv(
+                        mnxm_prop_ori_path, comment="#", sep="\t", header=None
                     )
                     #  Need to do this since id's are now mutiple and contain conflicts
-                    #  chem_prop["ID"] = [single_depr_mnxm(i) for i in chem_prop["ID"]]
-                    chem_prop.columns = [
+                    #  mnxm_prop["ID"] = [single_depr_mnxm(i) for i in mnxm_prop["ID"]]
+                    mnxm_prop.columns = [
                         "ID",
                         "name",
                         "reference",
@@ -1016,50 +1141,50 @@ class Data:
                         "InChIKey",
                         "SMILES",
                     ]
-                    chem_prop["InChIKey"] = [
+                    mnxm_prop["InChIKey"] = [
                         i.replace("InChIKey=", "") if not pd.isna(i) else i
-                        for i in chem_prop["InChIKey"]
+                        for i in mnxm_prop["InChIKey"]
                     ]
-                    chem_prop = chem_prop.set_index("ID")
-                    chem_prop = chem_prop.transpose().to_dict()
-                    compress_json.dump(chem_prop, chem_prop_path)
-                    chem_prop = None
-            self._chem_prop = compress_json.load(chem_prop_path)
-        return self._chem_prop
+                    mnxm_prop = mnxm_prop.set_index("ID")
+                    mnxm_prop = mnxm_prop.transpose().to_dict()
+                    compress_json.dump(mnxm_prop, mnxm_prop_path)
+                    mnxm_prop = None
+            self._mnxm_prop = compress_json.load(mnxm_prop_path)
+        return self._mnxm_prop
 
     @property
-    def reac_prop(self):
+    def mnxr_prop(self):
         """Return the chemical properties of molecules
 
-        This function will download the following file https://www.metanetx.org/cgi-bin/mnxget/mnxref/reac_prop.tsv that
+        This function will download the following file https://www.metanetx.org/cgi-bin/mnxget/mnxref/mnxr_prop.tsv that
         describes the chemical structure, etc...
 
         Args:
         Returns:
             dict: Reaction properties from MetaNetX
         """
-        if not self._reac_prop:
-            logging.debug("------ reac_prop -----")
+        if not self._mnxr_prop:
+            logging.debug("------ mnxr_prop -----")
             logging.debug("\t-> Populating...")
-            reac_prop_path = os.path.join(self.base_dir, "flatfiles/reac_prop.json.gz")
-            if not os.path.exists(reac_prop_path):
+            mnxr_prop_path = os.path.join(self.base_dir, "flatfiles/mnxr_prop.json.gz")
+            if not os.path.exists(mnxr_prop_path):
                 with tempfile.TemporaryDirectory() as tmpdirname:
-                    reac_prop_ori_path = os.path.join(tmpdirname, "reac_prop.tsv")
-                    if not os.path.exists(reac_prop_ori_path):
+                    mnxr_prop_ori_path = os.path.join(tmpdirname, "mnxr_prop.tsv")
+                    if not os.path.exists(mnxr_prop_ori_path):
                         logging.info(
-                            "The MetaNetX file reac_prop.tsv does not exist... downloading it"
+                            "The MetaNetX file mnxr_prop.tsv does not exist... downloading it"
                         )
                         urllib.request.urlretrieve(
                             "https://www.metanetx.org/cgi-bin/mnxget/mnxref/reac_prop.tsv",
-                            reac_prop_ori_path,
+                            mnxr_prop_ori_path,
                         )
-                    reac_prop = pd.read_csv(
-                        reac_prop_ori_path,
+                    reacs_prop = pd.read_csv(
+                        mnxr_prop_ori_path,
                         comment="#",
                         sep="\t",
                         header=None,
                     )
-                    reac_prop.columns = [
+                    reacs_prop.columns = [
                         "ID",
                         "mnx_equation",
                         "reference",
@@ -1067,31 +1192,38 @@ class Data:
                         "is_balanced",
                         "is_transport",
                     ]
-                    reac_prop = reac_prop.set_index("ID")
-                    reac_prop = reac_prop.transpose().to_dict()
-                    for i in reac_prop:
+                    reacs_prop = reacs_prop.set_index("ID")
+                    reacs_prop = reacs_prop.transpose().to_dict()
+                    for i in reacs_prop:
                         try:
-                            reac_prop[i]["classifs"] = reac_prop[i]["classifs"].split(
+                            reacs_prop[i]["ec"] = reacs_prop[i]["classifs"].split(
                                 ";"
                             )
                         except AttributeError:
-                            reac_prop[i]["classifs"] = ""
+                            reacs_prop[i]["ec"] = []
                     ### generate the reaction based in inchikeys
-                    for i in reac_prop:
+                    for i in reacs_prop:
                         try:
-                            reac_prop[i]['inchikey2_equation'] = \
-                                self.convert_mnxr_equation(reac_prop[i]['mnx_equation'], inchikey_levels=2)
+                            reacs_prop[i]['inchikey2_equation'] = \
+                                self.convert_mnxr_equation(reacs_prop[i]['mnx_equation'], inchikey_levels=2)
                         except (ValueError, KeyError) as e:
-                            reac_prop[i]['inchikey2_equation'] = ''
+                            reacs_prop[i]['inchikey2_equation'] = ''
                         try:
-                            reac_prop[i]['inchikey_equation'] = \
-                                self.convert_mnxr_equation(reac_prop[i]['mnx_equation'], inchikey_levels=3)
+                            reacs_prop[i]['inchikey_equation'] = \
+                                self.convert_mnxr_equation(reacs_prop[i]['mnx_equation'], inchikey_levels=3)
                         except (ValueError, KeyError) as e:
-                            reac_prop[i]['inchikey_equation'] = ''
+                            reacs_prop[i]['inchikey_equation'] = ''
+                    ### generate main left and main right
+                    for i in reacs_prop:
+                        reactants, products = self.parse_mnxr_equation(reacs_prop[i]['mnx_equation'])
+                        reacs_prop[i]['main_reactants'] = {y[1]: y[0] for y in reactants if y[1] not in self.mnxm_cofactors}
+                        reacs_prop[i]['secondary_reactants'] = {y[1]: y[0] for y in reactants if y[1] in self.mnxm_cofactors}
+                        reacs_prop[i]['main_products'] = {y[1]: y[0] for y in products if y[1] not in self.mnxm_cofactors}
+                        reacs_prop[i]['secondary_products'] = {y[1]: y[0] for y in products if y[1]  in self.mnxm_cofactors}
                     #save it
-                    compress_json.dump(reac_prop, reac_prop_path)
-            self._reac_prop = compress_json.load(reac_prop_path)
-        return self._reac_prop
+                    compress_json.dump(reacs_prop, mnxr_prop_path)
+            self._mnxr_prop = compress_json.load(mnxr_prop_path)
+        return self._mnxr_prop
 
     @property
     def biggm_mnxm(self):
@@ -1157,11 +1289,11 @@ class Data:
             logging.debug("------ inchikey_mnxm -----")
             logging.debug("\t-> Populating...")
             self._inchikey2_mnxm = {}
-            for i in self.chem_prop:
+            for i in self.mnxm_prop:
                 try:
-                    if not pd.isna(self.chem_prop[i]["InChIKey"]) or not self.chem_prop[i]["InChIKey"]=='nan':
+                    if not pd.isna(self.mnxm_prop[i]["InChIKey"]) or not self.mnxm_prop[i]["InChIKey"]=='nan':
                         self._inchikey2_mnxm[
-                            inchikey_layer_extract(self.chem_prop[i]['InChIKey'], 2)
+                            inchikey_layer_extract(self.mnxm_prop[i]['InChIKey'], 2)
                         ] = self.single_depr_mnxm(i)
                 except (KeyError, AttributeError) as e:
                     pass
@@ -1180,11 +1312,11 @@ class Data:
             logging.debug("------ inchikey_mnxm -----")
             logging.debug("\t-> Populating...")
             self._inchikey_mnxm = {}
-            for i in self.chem_prop:
+            for i in self.mnxm_prop:
                 try:
-                    if not pd.isna(self.chem_prop[i]["InChIKey"]):
+                    if not pd.isna(self.mnxm_prop[i]["InChIKey"]):
                         self._inchikey_mnxm[
-                            self.chem_prop[i]["InChIKey"]
+                            self.mnxm_prop[i]["InChIKey"]
                         ] = self.single_depr_mnxm(i)
                 except KeyError:
                     pass
@@ -1202,12 +1334,12 @@ class Data:
             logging.debug("------ mnxm_inchikey -----")
             logging.debug("\t-> Populating...")
             self._mnxm_inchikey = {}
-            for i in self.chem_prop:
+            for i in self.mnxm_prop:
                 try:
-                    if not pd.isna(self.chem_prop[i]["InChIKey"]):
+                    if not pd.isna(self.mnxm_prop[i]["InChIKey"]):
                         self._mnxm_inchikey[
                                 self.single_depr_mnxm(i)
-                        ] = self.chem_prop[i]["InChIKey"]
+                        ] = self.mnxm_prop[i]["InChIKey"]
                 except KeyError:
                     pass
         return self._mnxm_inchikey
@@ -1235,7 +1367,7 @@ class Data:
                         "The 1:1 assumption for keggr_mnxr is not respected for "
                         + str(i)
                     )
-            self._keggr_mnxr = {i: tmp[i][0] for i in tmp}
+            self._keggr_mnxr = {i: self.single_depr_mnxr(str(tmp[i][0])) for i in tmp}
         return self._keggr_mnxr
 
     @property
@@ -1261,7 +1393,7 @@ class Data:
                         "The 1:1 assumption for keggm_mnxm is not respected for "
                         + str(i)
                     )
-            self._keggm_mnxm = {i: tmp[i][0] for i in tmp}
+            self._keggm_mnxm = {i: self.single_depr_mnxm(str(tmp[i][0])) for i in tmp}
         return self._keggm_mnxm
 
     @property
@@ -1290,7 +1422,7 @@ class Data:
                         "the 1:1 assumption for chebim_mnxm is not respected for "
                         + str(i)
                     )
-            self._chebim_mnxm = {i: tmp[i][0] for i in tmp}
+            self._chebim_mnxm = {i: self.single_depr_mnxm(str(tmp[i][0])) for i in tmp}
         return self._chebim_mnxm
 
     @property
@@ -1301,26 +1433,26 @@ class Data:
             logging.debug("------ molname_mnxm ------")
             logging.debug("\t-> Populating...")
             self._molname_mnxm = {}
-            for mnxm in self.chem_prop:
-                if 'name' in self.chem_prop[mnxm]:
-                    if not pd.isna(self.chem_prop[mnxm]['name']):
-                        if self.chem_prop[mnxm]['name'] not in self._molname_mnxm:
-                            self._molname_mnxm[self.chem_prop[mnxm]['name']] = mnxm
+            for mnxm in self.mnxm_prop:
+                if 'name' in self.mnxm_prop[mnxm]:
+                    if not pd.isna(self.mnxm_prop[mnxm]['name']):
+                        if self.mnxm_prop[mnxm]['name'] not in self._molname_mnxm:
+                            self._molname_mnxm[self.mnxm_prop[mnxm]['name']] = mnxm
                         #else:
-                        #    logging.warning(f"Duplicate name entries for {self.chem_prop[mnxm]['name']}")
+                        #    logging.warning(f"Duplicate name entries for {self.mnxm_prop[mnxm]['name']}")
         return self._molname_mnxm
 
     # ################# search functions ###############
 
     # #### Pubchem #####
 
-    def exact_pubchem_search(self, query: str, itype: str = 'name') -> Dict[str, Any]:
+    def exact_pubchem_search(self, query: str, itype: str = 'name', return_lowest_cid: bool = False) -> Dict[str, Any]:
         """
         Perform an exact search on PubChem using the given identifier.
 
         Args:
             query (str): The compound name or identifier to search.
-            itype (str): The type of identifier (e.g., 'name', 'smiles', 'inchi'). Defaults to 'name'.
+            itype (str): The type of identifier (e.g., 'name', 'smiles', 'inchi', 'inchikey'). Defaults to 'name'.
 
         Returns:
             Dict[str, Any]: A dictionary containing the compound data if found. Empty dict if not found or ambiguous.
@@ -1328,6 +1460,7 @@ class Data:
         Raises:
             KeyError: If multiple compounds are returned for the query.
         """
+        cid = {}
         cid_keys = [
             "canonical_smiles",
             "charge",
@@ -1335,6 +1468,7 @@ class Data:
             "elements",
             "exact_mass",
             "inchi",
+            "inchikey",
             "isomeric_smiles",
             "iupac_name",
             "molecular_formula",
@@ -1370,14 +1504,63 @@ class Data:
             # Cache and return the single result
             cid = cids[0].to_dict()
             cid = {i: cid.get(i) for i in cid_keys}
-            self.pubchem_search_cache[query.lower()] = cid
-            return cid
         else:
-            logging.debug('There are multiple results')
-            # Cache the empty result and raise an error for ambiguity
-            self.pubchem_search_cache[query.lower()] = {}
-            raise KeyError(f'Multiple cids {cids} for {query}')
-        return {}
+            logging.warning(f'There are multiple results for query: {query} - {itype}')
+            if return_lowest_cid:
+                cid = min(cids, key=lambda x: int(x.cid))
+                cid = cid.to_dict()
+                cid = {i: cid.get(i) for i in cid_keys}
+            else:
+                # Cache the empty result and raise an error for ambiguity
+                self.pubchem_search_cache[query.lower()] = {}
+                raise KeyError(f'Multiple cids {cids} for {query}')
+        logging.debug(f'pubchem CID is {cid}')
+        #### xref ####
+        xref = {}
+        if 'cid' in cid:
+            r = requests.post(f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid.get("cid")}/xrefs/SBURL/JSON')
+            res_list = r.json()
+            xref['pubchem'] = [str(cid.get('cid'))]
+            for url in res_list.get('InformationList', {}).get('Information', [{}])[0].get('SBURL', []):
+                if 'https://biocyc.org/compound?orgid=META&id=' in url:
+                    xref.setdefault('biocyc', []).append(
+                        url.replace('https://biocyc.org/compound?orgid=META&id=', '')
+                    )
+                if 'http://www.hmdb.ca/cidbolites/' in url:
+                    xref.setdefault('hmdb', []).append(
+                        url.replace('http://www.hmdb.ca/cidbolites/', '')
+                    )
+                if 'http://www.genome.jp/dbget-bin/www_bget?cpd:' in url:
+                    xref.setdefault('kegg.compound', []).append(
+                        url.replace('http://www.genome.jp/dbget-bin/www_bget?cpd:', '')
+                    )
+                if 'http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:' in url:
+                    xref.setdefault('chebi', []).append(
+                        'CHEBI:' + url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', '')
+                    )
+                    xref['chebi'].append(
+                        url.replace('http://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:', '')
+                    )
+        xref['inchi'] = cid.get('inchi', '')
+        xref['inchikey'] = cid.get('inchikey', '')
+        xref['smiles'] = cid.get('canonical_smiles', '')
+        cid['xref'] = xref
+
+        cid['name'] = cid.pop('iupac_name')
+        cid['formula'] = cid.pop('molecular_formula')
+        cid['mass'] = cid.pop('exact_mass')
+
+        cid['InChI'] = cid.pop('inchi')
+        cid['InChIKey'] = cid.pop('inchikey')
+        cid['SMILES'] = cid.pop('canonical_smiles')
+        cid.pop('cid')
+        cid.pop('elements')
+        cid.pop('isomeric_smiles')
+        cid['weight'] = cid.pop('molecular_weight')
+
+        cid = replace_none_with_empty(cid)
+        self.pubchem_search_cache[query.lower()] = cid
+        return cid
     
 
     def molecule_name_search_inchikey(self, name: str) -> Optional[str]:
@@ -1563,8 +1746,10 @@ class Data:
                         tmp[i].split(":")[1].lower()
                     )
         #  properties
-        cp = self.single_chem_prop(_mnxm)
+        cp = self.single_mnxm_prop(_mnxm)
         cp["xref"] = xref
+        if not cp:
+            raise KeyError(f'Cannot find the cross reference for {mnxm}')
         if "metanetx.chemical" not in cp["xref"]:
             cp["xref"]["metanetx.chemical"] = [_mnxm]
         return cp, _mnxm
@@ -1581,7 +1766,7 @@ class Data:
         #  mnxr depr test
         _mnxr = self.single_depr_mnxr(mnxr.upper())
         #  xref
-        tmp = self.reac_xref[self.reac_xref["ID"] == mnxr]["source"].to_dict()
+        tmp = self.reac_xref[self.reac_xref["ID"] == _mnxr]["source"].to_dict()
         xref = {tmp[i].split(":")[0].lower(): [] for i in tmp if "MNX" not in tmp[i]}
         for i in tmp:
             if "MNX" not in tmp[i]:
@@ -1590,7 +1775,7 @@ class Data:
                         tmp[i].split(":")[1].lower()
                     )
         #  properties
-        cp = self.single_reac_prop(mnxr)
+        cp = self.single_mnxr_prop(_mnxr)
         if cp:
             try:
                 xref["ec-code"] = cp["classifs"]
@@ -1599,7 +1784,7 @@ class Data:
                 pass
         cp["xref"] = xref
         if "metanetx.reaction" not in cp["xref"]:
-            cp["xref"]["metanetx.reaction"] = [mnxr]
+            cp["xref"]["metanetx.reaction"] = [_mnxr]
         else:
             if _mnxr not in cp["xref"]["mnxr"]:
                 cp["xref"]["mnxr"].append(mnxr)
@@ -1626,9 +1811,9 @@ class Data:
         pbar = None
         if use_progressbar:
             if parse_brenda_files:
-                pbar = tqdm(total=13)
-            else:
                 pbar = tqdm(total=14)
+            else:
+                pbar = tqdm(total=15)
             pbar.set_description(f"Processing g_depr_mnxm")
         _ = self.g_depr_mnxm
         if use_progressbar:
@@ -1645,12 +1830,12 @@ class Data:
         _ = self.reac_xref
         if use_progressbar:
             pbar.update(1)
-            pbar.set_description(f"Processing chem_prop")
-        _ = self.chem_prop
+            pbar.set_description(f"Processing mnxm_prop")
+        _ = self.mnxm_prop
         if use_progressbar:
             pbar.update(1)
-            pbar.set_description(f"Processing reac_prop")
-        _ = self.reac_prop
+            pbar.set_description(f"Processing mnxr_prop")
+        _ = self.mnxr_prop
         if use_progressbar:
             pbar.update(1)
             pbar.set_description(f"Processing biggm_mnxm")
@@ -1683,6 +1868,10 @@ class Data:
             pbar.update(1)
             pbar.set_description(f"Processing molname_mnxm")
         _ = self.molname_mnxm
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing retrorules")
+        _ = self.retrorules_prop
         if parse_brenda_files:
             if use_progressbar:
                 pbar.update(1)

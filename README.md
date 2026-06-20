@@ -43,6 +43,12 @@ Pulls the image directly from Docker Hub:
 docker compose --profile hub up --build
 ```
 
+Or build directly:
+
+```bash
+docker build -t biopathopt:latest -f images/Dockerfile.original .
+```
+
 ### 2. Build from `images/Dockerfile.cache`
 
 Uses the cached build recipe for faster local builds. This is because the repeated
@@ -52,6 +58,7 @@ following file to generate the cache before :
 ```bash
 docker compose --profile cache up --build
 ```
+
 
 ### 3. Build from `images/Dockerfile` with `BRENDA_FILE`
 
@@ -66,6 +73,12 @@ docker compose --profile full up --build
 
 # Or override with a custom file
 BRENDA_FILE=brenda_2025_1.json docker compose --profile full up --build
+```
+
+Or build directly:
+
+```bash
+docker build -t biopathopt:cache -f images/Dockerfile.cache .
 ```
 
 ### Notes

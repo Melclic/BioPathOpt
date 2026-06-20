@@ -1,0 +1,40 @@
+version: "3.9"
+
+x-biopathopt-common: &biopathopt-common
+  container_name: biopathopt
+  ports:
+    - "8085:8085"
+  volumes:
+    - ${PWD}/notebooks/:/home/notebooks/
+  entrypoint: >
+    conda run -n biopathopt
+    jupyter lab --ip=0.0.0.0 --port=8085 --allow-root
+    --NotebookApp.token='' --NotebookApp.password=''
+    --notebook-dir /home/notebooks/
+
+services:
+  # Option 1: use image from Docker Hub
+  biopathopt_hub:
+    <<: *biopathopt-common
+    image: melclic/biopathopt:latest
+    profiles: ["hub"]
+
+  # Option 2: build from images/Dockerfile.cache
+  biopathopt_cache:
+    <<: *biopathopt-common
+    image: biopathopt:cache
+    build:
+      context: .
+      dockerfile: images/Dockerfile.cache
+    profiles: ["cache"]
+
+  # Option 3: build from images/Dockerfile (with build-arg)
+  biopathopt_full:
+    <<: *biopathopt-common
+    image: biopathopt:dev
+    build:
+      context: .
+      dockerfile: images/Dockerfile.original
+      args:
+        BRENDA_FILE: ${BRENDA_FILE:-brenda_2024_1.json}
+    profiles: ["original"]

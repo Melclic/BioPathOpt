@@ -2,45 +2,49 @@ FROM --platform=linux/amd64 continuumio/miniconda3
 
 RUN conda update -n base -c defaults conda
 
+WORKDIR /home/BioPathOpt/
+
 COPY environment.yml .
 RUN conda env create -f environment.yml
 
-WORKDIR /home
-
-#do this more complicated for testing purposes
-RUN mkdir biopathopt
-
-#copy all the cache files
-# NOTE: Comment this out if you would like to generate the data when buildding the docker
-RUN mkdir biopathopt/flatfiles/
-COPY biopathopt/flatfiles/brenda_sa.pkl biopathopt/flatfiles/
-COPY biopathopt/flatfiles/brenda_kcat.pkl biopathopt/flatfiles/
-COPY biopathopt/flatfiles/chem_prop.json.gz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/chem_xref.tsv.xz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/g_depr_mnxm.json.gz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/g_depr_mnxr.json.gz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/reac_prop.json.gz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/reac_xref.tsv.xz biopathopt/flatfiles/
-COPY biopathopt/flatfiles/brenda_ec_g.pkl biopathopt/flatfiles/
-
-#copy all the non-generative data
-RUN mkdir biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/EC_kcat_max.json biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/edge_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50 biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/fingerprint_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/atom_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/sequence_dict.pickle biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/bond_dict.pickle biopathopt/flatfiles/non_generative_data/
-
 #copy all the python
-COPY biopathopt/*.py biopathopt/
+WORKDIR /home/BioPathOpt/biopathopt/
+COPY biopathopt/*.py .
+
+WORKDIR /home/BioPathOpt/
 COPY setup.py .
 COPY requirements.txt . 
 COPY README.md .
 
+#copy all the cache files
+# NOTE: Comment this out if you would like to generate the data when buildding the docker
+COPY biopathopt/flatfiles/ /home/BioPathOpt/biopathopt/flatfiles/
+
+#copy all the non-generative data
+WORKDIR /home/BioPathOpt/biopathopt/flatfiles/non_generative_data/
+COPY biopathopt/flatfiles/non_generative_data/EC_kcat_max.json .
+COPY biopathopt/flatfiles/non_generative_data/edge_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50 . 
+COPY biopathopt/flatfiles/non_generative_data/fingerprint_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/atom_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/sequence_dict.pickle .
+COPY biopathopt/flatfiles/non_generative_data/bond_dict.pickle .
+
+WORKDIR /home/BioPathOpt/
 RUN conda run -n biopathopt pip install -e .
 # check the cache to make sure it is complete
 RUN conda run -n biopathopt python -c "import biopathopt; d = biopathopt.Data(); d.refresh_cache()"
 RUN conda run -n biopathopt python -c "from ete3 import NCBITaxa; ncbi = NCBITaxa()"
 
+#make sure that the environment is default
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+ENV CONDA_DEFAULT_ENV=biopathopt
+ENV PATH=$CONDA_DIR/envs/$CONDA_DEFAULT_ENV/bin:$PATH
+RUN echo "source activate $CONDA_DEFAULT_ENV" >> ~/.bashrc
+RUN conda run -n biopathopt python -V
+#required so that we can launch the correct environment
+CMD ["bash"]
+
+WORKDIR /home/
+COPY scripts/extract_sink.py .

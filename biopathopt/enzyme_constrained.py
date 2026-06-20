@@ -15,7 +15,6 @@ from Bio.SeqUtils.ProtParam import ProteinAnalysis
 import networkx as nx
 from io import StringIO
 from collections import defaultdict
-from ete3 import NCBITaxa
 import numpy as np
 import logging
 from tqdm import tqdm
@@ -49,22 +48,17 @@ class EnzymeConstrainedModel(ModelBuilder):
             gene_uniprot_annotation_name: str = 'uniprot',
             low_memory_mode: bool = False,
         ):
-        super().__init__(path_to_model=path_to_model, use_progressbar=use_progressbar, low_memory_mode=low_memory_mode)
+        super().__init__(
+                path_to_model=path_to_model, 
+                use_progressbar=use_progressbar, 
+                low_memory_mode=low_memory_mode,
+                species_name=species_name, 
+                taxonomy_id=taxonomy_id,
+                )
         #TODO: print the stats of uniprot, structure, etc... so that we can
         # give a warning if the coverage is too low
         self._check_gene_uniprot(gene_uniprot_annotation_name=gene_uniprot_annotation_name)
         self.species_name = species_name
-        self.taxonomy_id = taxonomy_id
-        if not self.taxonomy_id:
-            if self.model:
-                self.taxonomy_id = self.model.annotation.get('taxonomy', None)
-        if species_name and not self.taxonomy_id:
-            self.taxonomy = self._get_taxid_from_species(species_name)
-        if self.taxonomy_id and not species_name:
-            self.species_name = self._get_species_name(self.taxonomy_id)
-        if self.model:
-            if not self.model.annotation.get('taxonomy', None) and self.taxonomy_id:
-                self.model.annotation['taxonomy'] = self.taxonomy_id
         #TODO: Add the taxonomy id and species name in the model annotation
         self.cofactors_inchikey_layers3 = []
         self.cofactors_inchikey_layers2 = []
@@ -1536,23 +1530,6 @@ class EnzymeConstrainedModel(ModelBuilder):
             result[key] = value
 
         return result
-
-
-    def _get_species_name(
-        self,
-        taxid: int,
-    ) -> str:
-        """Return the species-level name from a taxonomy ID."""
-        ncbi = NCBITaxa()
-        lineage = ncbi.get_lineage(taxid)
-        names = ncbi.get_taxid_translator(lineage)
-        ranks = ncbi.get_rank(lineage)
-
-        for tid in lineage:
-            if ranks[tid] == "species":
-                return names[tid]
-        return names.get(taxid, "Unknown")
-
 
     def _rank_taxonomic_proximity(
         self,
