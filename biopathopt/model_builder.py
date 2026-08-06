@@ -128,7 +128,7 @@ class ModelBuilder(Data):
         if not 'biopathopt_enriched' in self.model.annotation:
             #replace deprecated metanetx ids
             logging.info('Replacing deprecated MXNM')
-            self._replace_depr_mnxm()
+            self._replace_dpr_mnxm()
             self._replace_dpr_mnxr()
             #update the metabolite annotation keys
             #TODO
@@ -363,7 +363,7 @@ class ModelBuilder(Data):
         return {}
 
 
-    def _replace_depr_mnxm(self) -> None:
+    def _replace_dpr_mnxm(self) -> None:
         """
         Replace deprecated MetaNetX chemical annotations for metabolites in the model.
 
