@@ -457,11 +457,14 @@ def extract_genes_from_gpr(expression: str) -> List[List[str]]:
 
     return result
 
+############# RDKIT utilities ###########
 
-'''
-from rdkit.Chem import MolFromSmiles, MolFromInchi, MolToSmiles, MolToInchi, MolToInchiKey, AddHs
+from rdkit.Chem import MolFromSmiles, MolFromInchi, MolToSmiles, MolToInchi, MolToInchiKey
+from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit.DataStructs import TanimotoSimilarity
 
-def convert_depiction(self, idepic, itype='smiles', otype={'inchikey'}):
+def _convert_depiction(idepic, itype='smiles', otype={'inchikey'}):
     """Convert chemical depiction to others type of depictions
 
     Usage example:
@@ -480,9 +483,9 @@ def convert_depiction(self, idepic, itype='smiles', otype={'inchikey'}):
     :return: Dictionnary of results
     """
     # Import (if needed)
-    self.logger.debug('input: '+str(idepic))
-    self.logger.debug('itype: '+str(itype))
-    self.logger.debug('otype: '+str(otype))
+    logging.debug('input: '+str(idepic))
+    logging.debug('itype: '+str(itype))
+    logging.debug('otype: '+str(otype))
     if itype == 'smiles':
         rdmol = MolFromSmiles(idepic, sanitize=True)
     elif itype == 'inchi':
@@ -490,8 +493,8 @@ def convert_depiction(self, idepic, itype='smiles', otype={'inchikey'}):
     else:
         raise NotImplementedError('"{}" is not a valid input type'.format(itype))
     if rdmol is None:  # Check imprt
-        raise self.DepictionError('Import error from depiction "{}" of type "{}"'.format(idepic, itype))
-    self.logger.debug('Sanitised the input')
+        raise TypeError('Import error from depiction "{}" of type "{}"'.format(idepic, itype))
+    logging.debug('Sanitised the input')
     # Export
     odepic = dict()
     for item in otype:
@@ -503,6 +506,72 @@ def convert_depiction(self, idepic, itype='smiles', otype={'inchikey'}):
             odepic[item] = MolToInchiKey(rdmol)
         else:
             raise NotImplementedError('"{}" is not a valid output type'.format(otype))
-    self.logger.debug('Exported the output')
+    logging.debug('Exported the output')
     return odepic
-'''
+
+def best_inchi_match(
+    query_inchi: str,
+    inchi_dict: Dict[str, str],
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> Tuple[Optional[str], float]:
+    """
+    Find the key of the molecule most similar to the given InChI
+    using RDKit Morgan fingerprints.
+
+    Args:
+        query_inchi (str):
+            The query molecule InChI.
+        inchi_dict (Dict[str, str]):
+            Dictionary with keys as identifiers and values as InChIs.
+        radius (int):
+            Morgan fingerprint radius. Defaults to 2.
+        n_bits (int):
+            Fingerprint size. Defaults to 2048.
+
+    Returns:
+        Tuple[Optional[str], float]:
+            (best matching key, Tanimoto similarity score).
+
+            Returns (None, 0.0) if the query InChI is invalid
+            or no valid molecules are found.
+    """
+
+    # Create Morgan fingerprint generator
+    gen = rdFingerprintGenerator.GetMorganGenerator(
+        radius=radius,
+        fpSize=n_bits
+    )
+
+    # Parse query molecule
+    query_mol = Chem.MolFromInchi(query_inchi)
+
+    if query_mol is None:
+        logging.error(f"Invalid query InChI: {query_inchi}")
+        return None, 0.0
+
+    # Generate query fingerprint
+    query_fp = gen.GetFingerprint(query_mol)
+
+    best_key = None
+    best_score = -1.0
+
+    for key, inchi in inchi_dict.items():
+        mol = Chem.MolFromInchi(inchi)
+
+        if mol is None:
+            logging.warning(f"Invalid InChI for {key}: {inchi}")
+            continue
+
+        fp = gen.GetFingerprint(mol)
+        sim = TanimotoSimilarity(query_fp, fp)
+
+        if sim > best_score:
+            best_key = key
+            best_score = sim
+
+    # Handle case where every dictionary InChI was invalid
+    if best_key is None:
+        return None, 0.0
+
+    return best_key, best_score

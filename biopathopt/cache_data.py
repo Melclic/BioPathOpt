@@ -69,10 +69,8 @@ class Data:
         self._keggm_mnxm = None
         self._chebim_mnxm = None
         self._molname_mnxm = None
-        self._brenda_ec_inchikey_kcat = {}
-        self._brenda_ec_inchikey_sa = {}
-        self._brenda_ec_g = None
         self._rr_prop = None
+        self._rr_recipes = None
         #  these are the user overwrites
         self.inchikey_overwrite = {
             "GPRLSGONYQIRFK-FTGQXOHASA-N": "GPRLSGONYQIRFK-UHFFFAOYSA-N",
@@ -99,7 +97,6 @@ class Data:
         self.pubchem_sec_count = 0
         self.ncbi = None
         self.fuzzy_search_cache = {}
-        self.brenda_rest_retries = 50
         """
         Includes the following plus others defined in the ECMpy package
                 # get all the hardcoded cofactors that exist
@@ -127,10 +124,8 @@ class Data:
         self._keggm_mnxm = None
         self._chebim_mnxm = None
         self._molname_mnxm = None
-        self._brenda_ec_inchikey_kcat = {}
-        self._brenda_ec_inchikey_sa = {}
-        self._brenda_ec_g = None
         self._rr_prop = None
+        self._rr_recipes = None
 
     ###########################
     ######### PARSE ###########
@@ -419,243 +414,7 @@ class Data:
                 """
         logging.warning("Cannot find chem properties for: " + str(mnxr))
         return {}
-
-    # ############# BRENDA ######################
-
-    def _get_protein_reactants_inchikey(self, ec_entry, protein_ids=[]):
-        #because the comments do not always have the right substrates, get the original reaction from the protein
-
-        def extract_reactants_inchikey(reactions_list, cofactor_list=[], filter_proteins_ids=[]):
-            reactant_dict = {}
-            logging.debug(f'extract_reactants_inchikey: {len(reactions_list)}')
-            for reac in reactions_list:
-                reactants = [y.strip() for y in reac.get('value').split('=')[0].split('+')]
-                for cof in cofactor_list:
-                    if set(cof.get('proteins')) & set(reac.get('proteins')):
-                        reactants = [i for i in reactants if i!=cof.get('value')]
-                inchikeys = []
-                for reactant in reactants:
-                    inchikey = self.molecule_name_search_inchikey(reactant.lower())
-                    if inchikey:
-                        inchikeys.append(inchikey)
-                if inchikeys:
-                    for p in reac.get('proteins'):
-                        if filter_proteins_ids:
-                            if p not in filter_proteins_ids:
-                                continue
-                        if p not in reactant_dict:
-                            reactant_dict[p] = []
-                        if tuple(sorted(inchikeys)) not in reactant_dict[p]:
-                            reactant_dict[p].append(tuple(sorted(inchikeys)))
-                        reactant_dict[p] = list(set(reactant_dict[p]))
-            return reactant_dict
-
-        reactions_list = []
-        if not reactions_list:
-            if 'substrates_products' in ec_entry:
-                if protein_ids:
-                    try:
-                        reactions_list = [y for y in ec_entry['substrates_products'] if set(protein_ids) & set(y['proteins'])]
-                    except KeyError:
-                        reactions_list = ec_entry['substrates_products']
-                else:
-                    reactions_list = ec_entry['substrates_products']
-        if not reactions_list:
-            if 'reaction' in ec_entry:
-                if protein_ids:
-                    try:
-                        reactions_list = [y for y in ec_entry['reaction'] if set(protein_ids) & set(y['proteins'])]
-                    except KeyError:
-                        reactions_list = ec_entry['reaction']
-                else:
-                    reactions_list = ec_entry['reaction']
-        if 'cofactor' in ec_entry:
-            if protein_ids:
-                try:
-                    cofactor_list = [y for y in ec_entry['cofactor'] if set(protein_ids) & set(y['proteins'])]
-                except KeyError:
-                    cofactor_list = ec_entry['cofactor']
-            else:
-                cofactor_list = ec_entry['cofactor']
-        else:
-            cofactor_list = []
-        logging.debug('extract_reactants_inchikey')
-        reactant_dict = extract_reactants_inchikey(
-            reactions_list=reactions_list, 
-            cofactor_list=cofactor_list,
-            filter_proteins_ids=protein_ids,
-        )
-        return reactant_dict
-
-
-    def _extract_brenda_substrates_sa(self, comment):
-        def is_single_word(text: str) -> bool:
-            return bool(re.fullmatch(r'\S+', text.strip()))
-        
-        def extract_substrate(text: str) -> str:
-            if is_single_word(text):
-                return text
-            match = re.search(r'substrate:\s*([A-Za-z0-9\-]+)', text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            match = re.search(r'substrate\s*([A-Za-z0-9\-]+)', text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            match = re.search(r'([A-Za-z0-9\-]+) as substrate', text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            return None
-        if 'substrate' in comment.lower():
-            ### Try to extract the substrate
-            result = extract_substrate(comment)
-            if result:
-                result = result.replace('.', '-').lower()
-            return result
-        return None
-
-    def _extract_brenda_substrates_kcat(self, entry):
-        match = re.search(r'([+-]?\d*\.?\d+)\s*\{([^}]+)\}', entry)
-        if match:
-            value = float(match.group(1))
-            substrate = match.group(2).replace('.', '-').lower()
-            return value, substrate
-        return None, None
-
-    def _generate_brenda_kinetics(
-            self, 
-            parse_type='kcat', 
-            use_progressbar: bool = False, 
-        ):
-        # check that the brenda file is there
-        brenda_path_file = os.path.join(
-            self.base_dir, "flatfiles/brenda.json.tar.gz"
-        )
-        if not os.path.exists(brenda_path_file):
-            raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
-        if parse_type not in ['kcat', 'sa']:
-            raise TypeError(f'Input Must be kcat or sa: {parse_type}')
-        pbar = None
-        last_read_bytes = 0
-        if use_progressbar:
-            total_bytes = os.path.getsize(brenda_path_file)
-            pbar = tqdm(total=total_bytes, unit="B", unit_scale=True, desc=f"Generate Brenda {parse_type} File")
-        for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
-            logging.debug(f'------------ {ec_number} ---------')
-            res = {}
-            if use_progressbar:
-                pbar.set_description(f"Generate Brenda {parse_type} File: {ec_number}")
-                delta = bytes_read - last_read_bytes
-                if delta > 0:
-                    pbar.update(delta)
-                    last_read_bytes = bytes_read
-            if parse_type=='kcat':
-                if ec_number in self._brenda_ec_inchikey_kcat:
-                    logging.debug(f'Skipping {ec_number}')
-                    continue
-            elif parse_type=='sa':
-                if ec_number in self._brenda_ec_inchikey_sa:
-                    logging.debug(f'Skipping {ec_number}')
-                    continue
-            logging.debug('deep copy')
-            if parse_type=='sa':
-                try:
-                    kinetics_list = copy.deepcopy(ec_entry['specific_activity'])
-                except KeyError:
-                    continue
-                try:
-                    protein_dict = ec_entry['protein']
-                except KeyError:
-                    continue
-            elif parse_type=='kcat':
-                try:
-                    kinetics_list = copy.deepcopy(ec_entry['kcat_km_value'])
-                except KeyError:
-                    continue
-                try:
-                    protein_dict = ec_entry['protein']
-                except KeyError:
-                    continue
-            ### get the reactants from the reaction description
-            logging.debug('_get_protein_reactants_inchikey')
-            try:
-                default_reactants = self._get_protein_reactants_inchikey(
-                    ec_entry=ec_entry
-                )
-            except KeyError:
-                default_reactants = {}
-            #res[ec_number] = {}
-            logging.debug('looping through the kinetics list')
-            logging.debug(len(kinetics_list))
-            for kinetic_entry in kinetics_list:
-                kinetic_entry['proteins'] = [protein_dict[y] for y in kinetic_entry.get('proteins')]
-                if 'mutant' in kinetic_entry.get('comment').lower() or 'mutated' in kinetic_entry.get('comment').lower():
-                    continue
-                to_add_org = [y.get('organism') for y in kinetic_entry.get('proteins')]
-                to_add_org = [y for y in to_add_org if y]       
-                sub_id = [('no_identifiable_substrate',)]
-                #extract from the comment
-                if parse_type=='sa':
-                    extracted_sub = self._extract_brenda_substrates_sa(kinetic_entry.get('comment').lower())
-                    try:
-                        value = float(kinetic_entry.get('value'))
-                        if value<=0.0:
-                            continue
-                    except ValueError:
-                        continue
-                elif parse_type=='kcat':
-                    value, extracted_sub = self._extract_brenda_substrates_kcat(kinetic_entry.get('value').lower())
-                    if not value and value>0.0:
-                        continue
-                if extracted_sub:
-                    logging.debug('molecule_name_search_inchikey')
-                    search_inchikey = self.molecule_name_search_inchikey(extracted_sub.lower())
-                    if search_inchikey:
-                        sub_id = [search_inchikey]
-                #because the comments do not always have the right substrates, get the original reaction from the protein
-                if sub_id==[('no_identifiable_substrate',)]:
-                    if default_reactants:
-                        tmp_s = []
-                        prots = kinetic_entry.get('proteins')
-                        if prots:
-                            try:
-                                for y in [default_reactants[i.get('id')] for i in prots]:
-                                    #make sure there are no None
-                                    tmp_s += [x for x in y if x]
-                            except KeyError:
-                                pass
-                        if tmp_s:
-                            sub_id = tmp_s
-                #### if uniprit is input check
-                try:
-                    to_add_uniprot = [y.get('accessions') for y in kinetic_entry.get('proteins') if y.get('source')=='uniprot']
-                    tmp_u = []
-                    for i in to_add_uniprot:
-                        if i:
-                            if isinstance(i, list):
-                                for y in i:
-                                    if y:
-                                        tmp_u.append(y)
-                            elif isinstance(i, str):
-                                tmp_u.append(i)
-                    to_add_uniprot = tmp_u
-                except (TypeError, KeyError) as e:
-                    to_add_uniprot = []
-                sub_id = tuple(sub_id)
-                if not sub_id in res:
-                    res[sub_id] = {}
-                for org in to_add_org:
-                    if org not in res[sub_id]:
-                        res[sub_id][org] = {'uniprot': [], 'values': [], 'comments': []}
-                    res[sub_id][org]['values'].append(value)
-                    res[sub_id][org]['uniprot'] += to_add_uniprot
-                    res[sub_id][org]['comments'].append(kinetic_entry.get('comment').lower())
-            if parse_type=='kcat':
-                self._brenda_ec_inchikey_kcat[ec_number] = res
-            elif parse_type=='sa':
-                self._brenda_ec_inchikey_sa[ec_number] = res
-        if last_read_bytes < total_bytes:
-            pbar.update(total_bytes - last_read_bytes)
-
+    
     ##### taxonomy ###
 
     def _get_species_name(
@@ -717,108 +476,6 @@ class Data:
     # ###########################################
     #  These are designed to behave as parameters. The first time its called it
     #  will load, and the next time around it will pass the saved parameter
-
-    # ############# BRENDA ######################
-
-    @property
-    def brenda_ec_g(self):
-        if not self._brenda_ec_g:
-            logging.debug('-------- brenda_ec_g ---------')
-            logging.debug('Populating.....')
-            path_file = os.path.join(
-                self.base_dir, "flatfiles/brenda_ec_g.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_g = pickle.load(f)
-            else:
-                ### generate it ####
-                def extract_history_ec(text):
-                    match = re.search(r'EC\s+(\d+\.\d+\.\d+\.\d+)', text)
-                    if match:
-                        ec_number = match.group(1)
-                        return ec_number
-                    return None
-                G = nx.DiGraph()
-                # check that the brenda file is there
-                brenda_path_file = os.path.join(
-                    self.base_dir, "flatfiles/brenda.json.tar.gz"
-                )
-                if not os.path.exists(brenda_path_file):
-                    raise TypeError('Need to download the file at: https://brenda-enzymes.org/download.php and save it as brenda.json.tar.gz in biopathopt/flatfiles')
-                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
-                    G.add_node(ec_number)    
-                for ec_number, ec_entry, bytes_read in stream_json(brenda_path_file, pointer='data'):
-                    if 'history' in ec_entry:
-                        to_ec = extract_history_ec(
-                            ec_entry['history']
-                        )
-                        if to_ec:
-                            G.add_edge(to_ec, ec_number)
-
-                with open(path_file, 'wb') as f:
-                    pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
-                self._brenda_ec_g = G
-        return self._brenda_ec_g
-
-    @property
-    def brenda_ec_inchikey_kcat(self):
-        if not self._brenda_ec_inchikey_kcat:
-            logging.debug("------ brenda_ec_inchikey_kcat -----")
-            logging.debug("\t-> Populating...")
-            path_file = os.path.join(
-                #self.base_dir, "flatfiles/brenda_ec_inchikey_kcat.pkl"
-                self.base_dir, "flatfiles/brenda_kcat.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_inchikey_kcat = pickle.load(f)
-            else:
-                for attempt in range(1, self.brenda_rest_retries + 1):
-                    try:
-                        self._generate_brenda_kinetics(
-                                parse_type='kcat', 
-                                use_progressbar=self.use_progressbar, 
-                            )
-                        break  # success, exit loop
-                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
-                        logging.warning(f'The following eror: {e}... retrying')
-                        if attempt >= self.brenda_rest_retries:
-                            raise e # give up after last attempt
-                        time.sleep(5.0)
-                with open(path_file, 'wb') as f:
-                    pickle.dump(self._brenda_ec_inchikey_kcat, f, pickle.HIGHEST_PROTOCOL)
-        return self._brenda_ec_inchikey_kcat
-
-
-    @property
-    def brenda_ec_inchikey_sa(self):
-        if not self._brenda_ec_inchikey_sa:
-            logging.debug("------ brenda_ec_inchikey_sa -----")
-            logging.debug("\t-> Populating...")
-            path_file = os.path.join(
-                #self.base_dir, "flatfiles/brenda_ec_inchikey_sa.pkl"
-                self.base_dir, "flatfiles/brenda_sa.pkl"
-            )
-            if os.path.exists(path_file):
-                with open(path_file, 'rb') as f:
-                    self._brenda_ec_inchikey_sa = pickle.load(f)
-            else:
-                for attempt in range(1, self.brenda_rest_retries + 1):
-                    try:
-                        self._generate_brenda_kinetics(
-                                parse_type='sa', 
-                                use_progressbar=self.use_progressbar, 
-                            )
-                        break  # success, exit loop
-                    except (pcp.PubChemHTTPError, URLError, RemoteDisconnected) as e:
-                        logging.warning(f'The following eror: {e}... retrying')
-                        if attempt >= self.brenda_rest_retries:
-                            raise e# give up after last attempt
-                        time.sleep(5.0)
-                with open(path_file, 'wb') as f:
-                    pickle.dump(self._brenda_ec_inchikey_sa, f, pickle.HIGHEST_PROTOCOL)
-        return self._brenda_ec_inchikey_sa
 
     ###### RETRORULES #########
 
@@ -889,6 +546,77 @@ class Data:
                     rr_prop = None
             self._rr_prop = compress_json.load(rr_prop_path)
         return self._rr_prop
+
+    @property
+    def retrorules_recipes(self):
+        """Return the chemical properties of molecules
+
+        This function will download the following file https://www.metanetx.org/cgi-bin/mnxget/mnxref/mnxr_prop.tsv that
+        describes the chemical structure, etc...
+
+        Args:
+        Returns:
+            dict: Reaction properties from MetaNetX
+        """
+        if not self._rr_recipes:
+            logging.debug("------ rr_recipes -----")
+            logging.debug("\t-> Populating...")
+            rr_recipes_path = os.path.join(self.base_dir, "flatfiles/rr_recipes.json.gz")
+            if not os.path.exists(rr_recipes_path):
+                rr_recipes = pd.read_csv(
+                    #os.path.join('data/rxn_recipes.tsv'),
+                    os.path.join(self.base_dir, "flatfiles/non_generative_data/rxn_recipes.tsv.gz")
+                    comment="#",
+                    sep="\t",
+                    header=None,
+                )
+                rr_recipes.columns = [
+                    "Reaction_ID", 
+                    "Equation", 
+                    "Description", 
+                    "Direction", 
+                    "EC_number", 
+                    "Name", 
+                    "Type", 
+                    "UniProt_IDs",
+                    "Additional_RIDs", 
+                    "Main_left", 
+                    "Main_right", 
+                    "Secondary_left", 
+                    "Secondary_right",
+                ]
+                rr_recipes = rr_recipes.set_index("Reaction_ID")
+                rr_recipes = rr_recipes.transpose().to_dict()
+                for i in rr_recipes:
+                    try:
+                        rr_recipes[i]["EC_number"] = rr_recipes[i]["EC_number"].split(
+                            ","
+                        )
+                    except AttributeError:
+                        rr_recipes[i]["EC_number"] = []
+                ### generate the reaction based in inchikeys
+                for i in rr_recipes:
+                    try:
+                        rr_recipes[i]['inchikey2_equation'] = \
+                            self.convert_mnxr_equation(rr_recipes[i]['Equation'], inchikey_levels=2)
+                    except (ValueError, KeyError) as e:
+                        rr_recipes[i]['inchikey2_equation'] = ''
+                    try:
+                        rr_recipes[i]['inchikey_equation'] = \
+                            self.convert_mnxr_equation(rr_recipes[i]['Equation'], inchikey_levels=3)
+                    except (ValueError, KeyError) as e:
+                        rr_recipes[i]['inchikey_equation'] = ''
+                ### generate main left and main right
+                for i in rr_recipes:
+                    reactants, products = self.parse_mnxr_equation(rr_recipes[i]['Equation'])
+                    rr_recipes[i]['main_reactants'] = {y[1]: y[0] for y in reactants if y[1] not in self.mnxm_cofactors}
+                    rr_recipes[i]['secondary_reactants'] = {y[1]: y[0] for y in reactants if y[1] in self.mnxm_cofactors}
+                    rr_recipes[i]['main_products'] = {y[1]: y[0] for y in products if y[1] not in self.mnxm_cofactors}
+                    rr_recipes[i]['secondary_products'] = {y[1]: y[0] for y in products if y[1]  in self.mnxm_cofactors}
+                #save it
+                compress_json.dump(rr_recipes, rr_recipes_path)
+            self._rr_recipes = compress_json.load(rr_recipes_path)
+        return self._rr_recipes
 
 
     #  ######### MetaNetX ###################
@@ -1795,8 +1523,7 @@ class Data:
     def refresh_cache(
             self, 
             delete_old_files=False, 
-            use_progressbar=True,
-            parse_brenda_files=True,
+            use_progressbar=True
             ):
         """Refresh all the cache files"""
         logging.info("Refreshing the cache. This may take a while...")
@@ -1810,10 +1537,7 @@ class Data:
                 os.remove(os.path.join(cache_dir, f))
         pbar = None
         if use_progressbar:
-            if parse_brenda_files:
-                pbar = tqdm(total=14)
-            else:
-                pbar = tqdm(total=15)
+            pbar = tqdm(total=14)
             pbar.set_description(f"Processing g_depr_mnxm")
         _ = self.g_depr_mnxm
         if use_progressbar:
@@ -1872,16 +1596,10 @@ class Data:
             pbar.update(1)
             pbar.set_description(f"Processing retrorules")
         _ = self.retrorules_prop
-        if parse_brenda_files:
-            if use_progressbar:
-                pbar.update(1)
-                pbar.set_description(f"Processing brenda_ec_g")
-            _ = self.brenda_ec_g
-            if use_progressbar:
-                pbar.close()
-            _ = self.brenda_ec_inchikey_sa
-            _ = self.brenda_ec_inchikey_kcat
-        else:
-            if use_progressbar:
-                pbar.close()
+        if use_progressbar:
+            pbar.update(1)
+            pbar.set_description(f"Processing retrorules")
+        _ = self.retrorules_recipes
+        if use_progressbar:
+            pbar.close()
 

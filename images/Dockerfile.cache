@@ -22,9 +22,7 @@ COPY biopathopt/flatfiles/ /home/BioPathOpt/biopathopt/flatfiles/
 
 #copy all the non-generative data
 WORKDIR /home/BioPathOpt/biopathopt/flatfiles/non_generative_data/
-COPY biopathopt/flatfiles/non_generative_data/EC_kcat_max.json .
 COPY biopathopt/flatfiles/non_generative_data/edge_dict.pickle .
-COPY biopathopt/flatfiles/non_generative_data/all--radius2--ngram3--dim20--layer_gnn3--window11--layer_cnn3--layer_output3--lr1e-3--lr_decay0.5--decay_interval10--weight_decay1e-6--iteration50 . 
 COPY biopathopt/flatfiles/non_generative_data/fingerprint_dict.pickle .
 COPY biopathopt/flatfiles/non_generative_data/atom_dict.pickle .
 COPY biopathopt/flatfiles/non_generative_data/sequence_dict.pickle .

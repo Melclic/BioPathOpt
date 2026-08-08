@@ -1,12 +1,9 @@
 from .version import __version__
 from .cache_data import Data
 from .model_builder import ModelBuilder
-from .enzyme_constrained import EnzymeConstrainedModel
-from .dlkcat import KcatPredictor, KcatPrediction
 
 from . import utils as utils
 from . import plots as plots
-from. fvseof import FVSEOF
 
 import logging
 
@@ -23,10 +20,6 @@ logging.basicConfig(
 __all__ = [
     'Data',
     'ModelBuilder',
-    'EnzymeConstrainedModel',
-    'KcatPredictor',
-    'KcatPrediction',
-    'FVSEOF',
     'utils',
     'plots',
 ]
