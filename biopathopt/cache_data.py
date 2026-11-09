@@ -563,9 +563,9 @@ class Data:
             logging.debug("\t-> Populating...")
             rr_recipes_path = os.path.join(self.base_dir, "flatfiles/rr_recipes.json.gz")
             if not os.path.exists(rr_recipes_path):
+                #os.path.join('data/rxn_recipes.tsv'),
                 rr_recipes = pd.read_csv(
-                    #os.path.join('data/rxn_recipes.tsv'),
-                    os.path.join(self.base_dir, "flatfiles/non_generative_data/rxn_recipes.tsv.gz")
+                    os.path.join(self.base_dir, "flatfiles/non_generative_data/rxn_recipes.tsv.gz"),
                     comment="#",
                     sep="\t",
                     header=None,
