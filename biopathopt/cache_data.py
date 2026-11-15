@@ -222,7 +222,7 @@ class Data:
             self,
             reac_str: str
     ) -> Tuple[List[List[str]], List[List[str]]]:
-        """Parses a metabolic network equation string from MetaNetX or RetroRules into reactants and products.
+        """Parses a metabolic network equation string from MetaNetX into reactants and products.
 
         This function takes a metabolic network equation string and parses it into
         lists of reactants and products. The input string should be in the form
@@ -476,148 +476,6 @@ class Data:
     # ###########################################
     #  These are designed to behave as parameters. The first time its called it
     #  will load, and the next time around it will pass the saved parameter
-
-    ###### RETRORULES #########
-
-    @property
-    def retrorules_prop(self):
-        """Return the properties of retrorules2 
-
-        This function will download the following file 
-        https://zenodo.org/record/5828017/files/retrorules_rr02_rp2_hs.tar.gz
-        that describe the retrorules properties of rules used byt rp2
-
-        Args:
-        Returns:
-            dict: RetroRules rules properties
-        """
-        def _same_or_zero(lst: list[int]) -> int:
-            """Return the integer if both elements in list are equal, else 0."""
-            return lst[0] if len(lst) == 2 and lst[0] == lst[1] else 0
-
-        if not self._rr_prop:
-            logging.debug("------ retrorules_prop ----")
-            logging.debug("\t-> Populating...")
-            rr_prop_path = os.path.join(self.base_dir, "flatfiles/rr_prop.json.gz")
-            if not os.path.exists(rr_prop_path):
-                logging.info("RetroRules 2 prop does not exist... generating it")
-                with tempfile.TemporaryDirectory() as tmpdirname:
-                    rr_prop_ori_path = os.path.join(tmpdirname, "rr_prop.tsv")
-                    tmp_tar_path = os.path.join(tmpdirname, 'tmp.tar.gz')
-                    urllib.request.urlretrieve(
-                        "https://zenodo.org/record/5828017/files/retrorules_rr02_rp2_hs.tar.gz",
-                        tmp_tar_path,
-                    )
-                    with tarfile.open(tmp_tar_path, "r:gz") as tar:
-                        tar.extractall(path=tmpdirname)
-                    rr_prop = pd.read_csv(
-                        os.path.join(tmpdirname, "retrorules_rr02_rp2_hs", "retrorules_rr02_rp2_flat_all.csv")
-                    )
-                    rr_prop['mnxr'] = [self.single_depr_mnxr(i.split('_')[0]) for i in rr_prop['Legacy ID']]
-                    rr_prop['mnxm'] = [self.single_depr_mnxm(i.split('_')[1]) for i in rr_prop['Legacy ID']]
-                    retrorules_prop = {}
-                    for index, r in rr_prop.iterrows():
-                        #merge those that are the same
-                        if not r['Rule ID'] in retrorules_prop:
-                            retrorules_prop[r['Rule ID']] = {}
-                        if not r['mnxr'] in retrorules_prop[r['Rule ID']]:
-                            retrorules_prop[r['Rule ID']][r['mnxr']] = {}
-                        if r['mnxm'] in retrorules_prop[r['Rule ID']][r['mnxr']]:
-                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['ec'] = list(set(
-                                    [y for y in r['EC number'].split(';') if y!='NOEC']+retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['ec']
-                                ))
-                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['rule_score'] = float(np.mean([
-                                    r['Score normalized'],
-                                    float(retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['rule_score']),
-                                ]))
-                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['direction'] = _same_or_zero(
-                                    [
-                                        int(r['Rule relative direction']), 
-                                        retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']]['direction'],
-                                    ]
-                                )
-                        else:
-                            retrorules_prop[r['Rule ID']][r['mnxr']][r['mnxm']] = {
-                                'ec': [y for y in r['EC number'].split(';') if y!='NOEC'],
-                                'rule_score': float(r['Score normalized']),
-                                'direction': int(r['Rule relative direction']),
-                            }
-                    compress_json.dump(retrorules_prop, rr_prop_path)
-                    rr_prop = None
-            self._rr_prop = compress_json.load(rr_prop_path)
-        return self._rr_prop
-
-    @property
-    def retrorules_recipes(self):
-        """Return the chemical properties of molecules
-
-        This function will download the following file https://www.metanetx.org/cgi-bin/mnxget/mnxref/mnxr_prop.tsv that
-        describes the chemical structure, etc...
-
-        Args:
-        Returns:
-            dict: Reaction properties from MetaNetX
-        """
-        if not self._rr_recipes:
-            logging.debug("------ rr_recipes -----")
-            logging.debug("\t-> Populating...")
-            rr_recipes_path = os.path.join(self.base_dir, "flatfiles/rr_recipes.json.gz")
-            if not os.path.exists(rr_recipes_path):
-                #os.path.join('data/rxn_recipes.tsv'),
-                rr_recipes = pd.read_csv(
-                    os.path.join(self.base_dir, "flatfiles/non_generative_data/rxn_recipes.tsv.gz"),
-                    comment="#",
-                    sep="\t",
-                    header=None,
-                )
-                rr_recipes.columns = [
-                    "Reaction_ID", 
-                    "Equation", 
-                    "Description", 
-                    "Direction", 
-                    "EC_number", 
-                    "Name", 
-                    "Type", 
-                    "UniProt_IDs",
-                    "Additional_RIDs", 
-                    "Main_left", 
-                    "Main_right", 
-                    "Secondary_left", 
-                    "Secondary_right",
-                ]
-                rr_recipes = rr_recipes.set_index("Reaction_ID")
-                rr_recipes = rr_recipes.transpose().to_dict()
-                for i in rr_recipes:
-                    try:
-                        rr_recipes[i]["EC_number"] = rr_recipes[i]["EC_number"].split(
-                            ","
-                        )
-                    except AttributeError:
-                        rr_recipes[i]["EC_number"] = []
-                ### generate the reaction based in inchikeys
-                for i in rr_recipes:
-                    try:
-                        rr_recipes[i]['inchikey2_equation'] = \
-                            self.convert_mnxr_equation(rr_recipes[i]['Equation'], inchikey_levels=2)
-                    except (ValueError, KeyError) as e:
-                        rr_recipes[i]['inchikey2_equation'] = ''
-                    try:
-                        rr_recipes[i]['inchikey_equation'] = \
-                            self.convert_mnxr_equation(rr_recipes[i]['Equation'], inchikey_levels=3)
-                    except (ValueError, KeyError) as e:
-                        rr_recipes[i]['inchikey_equation'] = ''
-                ### generate main left and main right
-                for i in rr_recipes:
-                    reactants, products = self.parse_mnxr_equation(rr_recipes[i]['Equation'])
-                    rr_recipes[i]['main_reactants'] = {y[1]: y[0] for y in reactants if y[1] not in self.mnxm_cofactors}
-                    rr_recipes[i]['secondary_reactants'] = {y[1]: y[0] for y in reactants if y[1] in self.mnxm_cofactors}
-                    rr_recipes[i]['main_products'] = {y[1]: y[0] for y in products if y[1] not in self.mnxm_cofactors}
-                    rr_recipes[i]['secondary_products'] = {y[1]: y[0] for y in products if y[1]  in self.mnxm_cofactors}
-                #save it
-                compress_json.dump(rr_recipes, rr_recipes_path)
-            self._rr_recipes = compress_json.load(rr_recipes_path)
-        return self._rr_recipes
-
 
     #  ######### MetaNetX ###################
     #  taken from metnetx website. All the deprecated version of the ID's to the current id's
@@ -1592,14 +1450,6 @@ class Data:
             pbar.update(1)
             pbar.set_description(f"Processing molname_mnxm")
         _ = self.molname_mnxm
-        if use_progressbar:
-            pbar.update(1)
-            pbar.set_description(f"Processing retrorules")
-        _ = self.retrorules_prop
-        if use_progressbar:
-            pbar.update(1)
-            pbar.set_description(f"Processing retrorules")
-        _ = self.retrorules_recipes
         if use_progressbar:
             pbar.close()
 
