@@ -116,12 +116,12 @@ class ModelBuilder(Data):
 
     def _read_model(self, path_to_model: str):
         #read if gzip , sbml or json
-        if path_to_model.endswith('json.gz') or path_to_model.endswith('json.gzip'):
+        if str(path_to_model).endswith('json.gz') or str(path_to_model).endswith('json.gzip'):
             with gzip.open(path_to_model, 'rt', encoding='utf-8') as gz_file:
                 self.model = cobra.io.load_json_model(gz_file)
-        elif path_to_model.endswith('json'):
+        elif str(path_to_model).endswith('json'):
             self.model = cobra.io.load_json_model(path_to_model)
-        elif path_to_model.endswith('sbml') or path_to_model.endswith('xml'):
+        elif str(path_to_model).endswith('sbml') or str(path_to_model).endswith('xml'):
             self.model = cobra.io.read_sbml_model(path_to_model)
         else:
             raise TypeError('Cannot recognise the input file extension')
@@ -190,13 +190,13 @@ class ModelBuilder(Data):
             to_save_model = input_model
         else:
             to_save_model = self.model
-        if file_path.endswith('json.gz') or file_path.endswith('json.gzip'):
+        if str(file_path).endswith('json.gz') or str(file_path).endswith('json.gzip'):
             json_str = cobra.io.to_json(to_save_model)  # serialize model to JSON string
             with gzip.open(file_path, 'wt', encoding='utf-8') as f:
                 f.write(json_str)    
-        elif file_path.endswith('json'):
+        elif str(file_path).endswith('json'):
             cobra.io.save_json_model(to_save_model, file_path)
-        elif file_path.endswith('sbml') or file_path.endswith('.xml'):
+        elif str(file_path).endswith('sbml') or str(file_path).endswith('.xml'):
             cobra.io.write_sbml_model(to_save_model, file_path)
         else:
             raise TypeError('Cannot recognize the output file type')
