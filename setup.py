@@ -23,7 +23,7 @@ third_party_require = [
     "numpy",
     "pandas",
     "pubchempy",
-    "rapidfuzz>",
+    "rapidfuzz",
     "rdkit",
     "Requests",
     "setuptools",
